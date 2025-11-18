@@ -532,11 +532,20 @@ def grow_tree(
 
     split_rule = tree.split_rules[selected_predictor]
 
-    split_value = split_rule.get_split_value(available_splitting_values)
+    # For TargetMeanSplitRule, we need to pass y values
+    if hasattr(split_rule, '__class__') and split_rule.__class__.__name__ == 'TargetMeanSplitRule':
+        # Get the y values for the current data points
+        # Note: This assumes sum_trees contains the predictions/residuals
+        # You might need to adjust this based on how your y values are stored
+        y_values = sum_trees[:, idx_data_points]  # Adjust this line as needed
+        split_value = split_rule.get_split_value(available_splitting_values, y_values)
+    else:
+        split_value = split_rule.get_split_value(available_splitting_values)
 
     if split_value is None:
         return None
 
+    # Rest of the function remains the same...
     to_left = split_rule.divide(available_splitting_values, split_value)
     new_idx_data_points = idx_data_points[to_left], idx_data_points[~to_left]
 
