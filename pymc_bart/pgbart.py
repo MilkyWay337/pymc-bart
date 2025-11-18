@@ -71,7 +71,6 @@ class ParticleTree:
         tree_grew = False
         if self.expansion_nodes:
             index_leaf_node = self.expansion_nodes.pop(0)
-            # Probability that this node will remain a leaf node
             prob_leaf = prior_prob_leaf_node[get_depth(index_leaf_node)]
 
             if prob_leaf < np.random.random():
@@ -532,20 +531,15 @@ def grow_tree(
 
     split_rule = tree.split_rules[selected_predictor]
 
-    # For TargetMeanSplitRule, we need to pass y values
-    if hasattr(split_rule, '__class__') and split_rule.__class__.__name__ == 'TargetMeanSplitRule':
-        # Get the y values for the current data points
-        # Note: This assumes sum_trees contains the predictions/residuals
-        # You might need to adjust this based on how your y values are stored
-        y_values = sum_trees[:, idx_data_points]  # Adjust this line as needed
-        split_value = split_rule.get_split_value(available_splitting_values, y_values)
-    else:
-        split_value = split_rule.get_split_value(available_splitting_values)
+    # <<< НОВОЕ: y_for_split для TargetMeanSplitRule >>>
+    # Среднее текущее предсказание в узле — отличный proxy для target/residuals
+    y_for_split = np.mean(sum_trees[..., idx_data_points], axis=tuple(range(sum_trees.ndim - 1)))
+
+    split_value = split_rule.get_split_value(available_splitting_values, y_for_split)
 
     if split_value is None:
         return None
 
-    # Rest of the function remains the same...
     to_left = split_rule.divide(available_splitting_values, split_value)
     new_idx_data_points = idx_data_points[to_left], idx_data_points[~to_left]
 
@@ -578,7 +572,6 @@ def grow_tree(
 
     tree.grow_leaf_node(current_node, selected_predictor, split_value, index_leaf_node)
     return current_node_children
-
 
 def filter_missing_values(available_splitting_values, idx_data_points, missing_data):
     if missing_data:
