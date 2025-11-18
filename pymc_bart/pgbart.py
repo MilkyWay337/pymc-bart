@@ -28,7 +28,7 @@ from pytensor import function as pytensor_function
 from pytensor.tensor.variable import Variable
 
 from pymc_bart.bart import BARTRV
-from pymc_bart.split_rules import ContinuousSplitRule, TargetMeanSplitRule
+from pymc_bart.split_rules import ContinuousSplitRule
 from pymc_bart.tree import (
     Node,
     Tree,
@@ -62,12 +62,12 @@ class ParticleTree:
         X,
         missing_data,
         sum_trees,
+        residuals,  # Added residuals parameter for TargetMeanSplitRule
         leaf_sd,
         m,
         response,
         normal,
         shape,
-        Y,
     ) -> bool:
         tree_grew = False
         if self.expansion_nodes:
@@ -84,12 +84,12 @@ class ParticleTree:
                     X,
                     missing_data,
                     sum_trees,
+                    residuals,  # Pass residuals to grow_tree
                     leaf_sd,
                     m,
                     response,
                     normal,
                     shape,
-                    Y,
                 )
                 if idx_new_nodes is not None:
                     self.expansion_nodes.extend(idx_new_nodes)
@@ -255,7 +255,7 @@ class PGBART(ArrayStepShared):
         self.all_trees = np.array([[p.tree for p in pl] for pl in self.all_particles])
         self.lower = 0
         self.iter = 0
-        super().__init__([value_bart], shared)
+        super().__init__(vars, shared)
 
     def astep(self, _):
         variable_inclusion = np.zeros(self.num_variates, dtype="int")
@@ -271,6 +271,15 @@ class PGBART(ArrayStepShared):
                 self.sum_trees_noi[odim] = (
                     self.sum_trees[odim] - self.all_particles[odim][tree_id].tree._predict()
                 )
+                
+                # Compute residuals for TargetMeanSplitRule
+                # For multi-dimensional outputs, use the first dimension
+                if self.sum_trees_noi[odim].ndim > 1:
+                    current_predictions = self.sum_trees_noi[odim][0]  # Use first dimension
+                else:
+                    current_predictions = self.sum_trees_noi[odim]
+                residuals = self.Y - current_predictions
+
                 # Generate an initial set of particles
                 # at the end we return one of these particles as the new tree
                 particles = self.init_particles(tree_id, odim)
@@ -286,12 +295,12 @@ class PGBART(ArrayStepShared):
                             self.X,
                             self.missing_data,
                             self.sum_trees[odim],
+                            residuals,  # Pass residuals for TargetMeanSplitRule
                             self.leaf_sd[odim],
                             self.m,
                             self.response,
                             self.normal,
                             self.leaves_shape,
-                            self.Y,
                         ):
                             self.update_weight(p, odim)
                         if p.expansion_nodes:
@@ -518,12 +527,12 @@ def grow_tree(
     X,
     missing_data,
     sum_trees,
+    residuals,  # Added residuals parameter for TargetMeanSplitRule
     leaf_sd,
     m,
     response,
     normal,
     shape,
-    Y,
 ):
     current_node = tree.get_node(index_leaf_node)
     idx_data_points = current_node.idx_data_points
@@ -536,16 +545,15 @@ def grow_tree(
 
     split_rule = tree.split_rules[selected_predictor]
 
-    # Pass additional parameters for TargetMeanSplitRule
-    if split_rule is TargetMeanSplitRule:
-        split_value = split_rule.get_split_value(
-            available_splitting_values,
-            idx_data_points=idx_data_points,
-            Y=Y,
-            sum_trees=sum_trees,
-        )
+    # Get the y values for the current data points from residuals
+    # For multi-dimensional outputs, use the first dimension
+    if residuals.ndim > 1:
+        y_values = residuals[idx_data_points, 0]  # Use first dimension
     else:
-        split_value = split_rule.get_split_value(available_splitting_values)
+        y_values = residuals[idx_data_points]
+    
+    # Pass y_values to get_split_value for all split rules
+    split_value = split_rule.get_split_value(available_splitting_values, y_values)
 
     if split_value is None:
         return None
