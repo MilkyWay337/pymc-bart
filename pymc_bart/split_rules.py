@@ -84,20 +84,43 @@ class TargetMeanSplitRule(SplitRule):
 
     @staticmethod
     def get_split_value(available_splitting_values, y=None):
-        if y is None:
-        # Если y не предоставлен, ведем себя как случайное правило
-            return SubsetSplitRule.get_split_value(available_splitting_values)
-    
-    # Иначе используем логику на основе y
-    # ... ваша реализация ...
+        """
+        Returns a subset of categories forming the left branch.
         
+        Parameters
+        ----------
+        available_splitting_values : np.ndarray
+            Category values at this node
+        y : np.ndarray, optional
+            Target values corresponding to the same rows. If None, falls back to SubsetSplitRule.
+        """
+        if y is None:
+            # Если y не предоставлен, ведем себя как случайное правило
+            return SubsetSplitRule.get_split_value(available_splitting_values)
+        
+        # Проверяем, что y имеет правильную форму
+        if len(y) != len(available_splitting_values):
+            raise ValueError("y must have the same length as available_splitting_values")
+        
+        # Unique categories
         cats, inv = np.unique(available_splitting_values, return_inverse=True)
 
         # Mean target per category
-        means = np.array([
-            y[inv == i].mean() if np.sum(inv == i) > 0 else 0.0
-            for i in range(len(cats))
-        ])
+        means = []
+        valid_categories = []
+        
+        for i, cat in enumerate(cats):
+            mask = inv == i
+            if np.sum(mask) > 0:
+                cat_mean = y[mask].mean()
+                means.append(cat_mean)
+                valid_categories.append(cat)
+        
+        if len(valid_categories) <= 1:
+            return None
+            
+        means = np.array(means)
+        cats = np.array(valid_categories)
 
         # Order categories by target mean
         order = np.argsort(means)
