@@ -25,7 +25,7 @@ class SplitRule:
 
     @staticmethod
     @abstractmethod
-    def get_split_value(available_splitting_values, **kwargs):
+    def get_split_value(available_splitting_values):
         pass
 
     @staticmethod
@@ -118,7 +118,7 @@ class TargetMeanSplitRule(SplitRule):
     """
 
     @staticmethod
-    def get_split_value(available_splitting_values, **kwargs):
+    def get_split_value(available_splitting_values, idx_data_points=None, Y=None, sum_trees=None):
         """
         Compute split value based on target mean encoding.
         
@@ -126,11 +126,12 @@ class TargetMeanSplitRule(SplitRule):
         ----------
         available_splitting_values : np.ndarray
             Array of categorical values at this node
-        **kwargs : dict
-            Must contain:
-            - idx_data_points: indices of data points at this node
-            - Y: full target array
-            - sum_trees: current sum of trees predictions (for residuals)
+        idx_data_points : np.ndarray, optional
+            Indices of data points at this node
+        Y : np.ndarray, optional
+            Full target array
+        sum_trees : np.ndarray, optional
+            Current sum of trees predictions (for residuals)
             
         Returns
         -------
@@ -139,11 +140,7 @@ class TargetMeanSplitRule(SplitRule):
         """
         split_value = None
         
-        # Extract required data from kwargs
-        idx_data_points = kwargs.get('idx_data_points')
-        Y = kwargs.get('Y')
-        sum_trees = kwargs.get('sum_trees')
-        
+        # Check if we have all required data
         if idx_data_points is None or Y is None or sum_trees is None:
             # Fallback to random split if target information not available
             if available_splitting_values.size > 1 and not np.all(
