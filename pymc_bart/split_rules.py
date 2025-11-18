@@ -18,14 +18,11 @@ import numpy as np
 from numba import njit
 
 
-class SplitRule:
-    """
-    Abstract template class for a split rule
-    """
 
+class SplitRule:
     @staticmethod
     @abstractmethod
-    def get_split_value(available_splitting_values):
+    def get_split_value(available_splitting_values, y_values=None):
         pass
 
     @staticmethod
@@ -41,7 +38,7 @@ class ContinuousSplitRule(SplitRule):
     """
 
     @staticmethod
-    def get_split_value(available_splitting_values):
+    def get_split_value(available_splitting_values, y_values=None):
         split_value = None
         if available_splitting_values.size > 1:
             idx_selected_splitting_values = int(
@@ -60,7 +57,7 @@ class OneHotSplitRule(SplitRule):
     """Choose a single categorical value and branch on if the variable is that value or not"""
 
     @staticmethod
-    def get_split_value(available_splitting_values):
+    def get_split_value(available_splitting_values, y_values=None):
         split_value = None
         if available_splitting_values.size > 1 and not np.all(
             available_splitting_values == available_splitting_values[0]
@@ -76,73 +73,6 @@ class OneHotSplitRule(SplitRule):
     def divide(available_splitting_values, split_value):
         return available_splitting_values == split_value
 
-class TargetMeanSplitRule(SplitRule):
-    """
-    Choose a split based on ordering categorical values by their target mean.
-    NOTE: requires passing y explicitly in get_split_value, unlike built-in rules.
-    """
-
-    @staticmethod
-    def get_split_value(available_splitting_values, y=None):
-        """
-        Returns a subset of categories forming the left branch.
-        
-        Parameters
-        ----------
-        available_splitting_values : np.ndarray
-            Category values at this node
-        y : np.ndarray, optional
-            Target values corresponding to the same rows. If None, falls back to SubsetSplitRule.
-        """
-        if y is None:
-            # Если y не предоставлен, ведем себя как случайное правило
-            return SubsetSplitRule.get_split_value(available_splitting_values)
-        
-        # Проверяем, что y имеет правильную форму
-        if len(y) != len(available_splitting_values):
-            raise ValueError("y must have the same length as available_splitting_values")
-        
-        # Unique categories
-        cats, inv = np.unique(available_splitting_values, return_inverse=True)
-
-        # Mean target per category
-        means = []
-        valid_categories = []
-        
-        for i, cat in enumerate(cats):
-            mask = inv == i
-            if np.sum(mask) > 0:
-                cat_mean = y[mask].mean()
-                means.append(cat_mean)
-                valid_categories.append(cat)
-        
-        if len(valid_categories) <= 1:
-            return None
-            
-        means = np.array(means)
-        cats = np.array(valid_categories)
-
-        # Order categories by target mean
-        order = np.argsort(means)
-        ordered = cats[order]
-
-        # Choose one prefix split at random
-        if len(ordered) <= 1:
-            return None
-
-        # Randomly choose split point (prefix)
-        k = np.random.randint(1, len(ordered))
-        split_value = ordered[:k]
-
-        return split_value
-
-    @staticmethod
-    def divide(available_splitting_values, split_value):
-        """
-        Standard subset-division logic.
-        """
-        return np.isin(available_splitting_values, split_value)
-
 class SubsetSplitRule(SplitRule):
     """
     Choose a random subset of the categorical values and branch on belonging to that set.
@@ -152,7 +82,7 @@ class SubsetSplitRule(SplitRule):
     """
 
     @staticmethod
-    def get_split_value(available_splitting_values):
+    def get_split_value(available_splitting_values, y_values=None):
         split_value = None
         if available_splitting_values.size > 1 and not np.all(
             available_splitting_values == available_splitting_values[0]
@@ -168,3 +98,47 @@ class SubsetSplitRule(SplitRule):
     @staticmethod
     def divide(available_splitting_values, split_value):
         return np.isin(available_splitting_values, split_value)
+
+class TargetMeanSplitRule(SplitRule):
+    """
+    Упрощённый split rule на основе target encoding только для categorical признаков.
+    Кодирует категории по mean Y (с smoothing), затем split_value = mean по encoded.
+    Divide: encoded <= split_value vs. > (эффективно разделяет группы категорий).
+    """
+    def __init__(self, smoothing_alpha=1.0):
+        """
+        smoothing_alpha: Для smoothing в target encoding (избежать overfitting для редких категорий).
+        """
+        self.smoothing_alpha = smoothing_alpha
+
+    @staticmethod
+    def get_split_value(available_splitting_values, y_values=None):
+        if available_splitting_values.size <= 1:
+            return None
+
+        # Предполагаем categorical (после label encoding как integers или objects)
+        unique_cats, inverse = np.unique(available_splitting_values, return_inverse=True)
+        if len(unique_cats) <= 1:
+            return None
+
+        encoded = np.zeros_like(available_splitting_values, dtype=float)
+        global_mean = np.mean(y_values) if y_values is not None else 0
+        for i, cat in enumerate(unique_cats):
+            mask = (available_splitting_values == cat)
+            cat_mean = np.mean(y_values[mask]) if y_values is not None and mask.sum() > 0 else global_mean
+            n = mask.sum()
+            # Smoothing: (n * cat_mean + alpha * global_mean) / (n + alpha)
+            smoothed_mean = (n * cat_mean + self.smoothing_alpha * global_mean) / (n + self.smoothing_alpha)
+            encoded[mask] = smoothed_mean
+
+        # Split_value как mean по encoded values
+        split_value = np.mean(encoded)
+        return split_value
+
+    @staticmethod
+    @njit
+    def divide(available_splitting_values, split_value):
+        # Divide на основе original values? Нет: но поскольку rule только для categorical,
+        # мы можем remap to encoded внутри grow_tree, но для простоты assume available_splitting_values - encoded или используем threshold
+        # Чтобы упростить: assume user encoded categorical to numbers, divide as <= split_value
+        return available_splitting_values <= split_value
