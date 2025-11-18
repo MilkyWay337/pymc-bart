@@ -25,7 +25,7 @@ class SplitRule:
 
     @staticmethod
     @abstractmethod
-    def get_split_value(available_splitting_values):
+    def get_split_value(available_splitting_values, y=None):
         pass
 
     @staticmethod
@@ -41,7 +41,7 @@ class ContinuousSplitRule(SplitRule):
     """
 
     @staticmethod
-    def get_split_value(available_splitting_values, **kwargs):
+    def get_split_value(available_splitting_values, y=None):
         split_value = None
         if available_splitting_values.size > 1:
             idx_selected_splitting_values = int(
@@ -60,7 +60,7 @@ class OneHotSplitRule(SplitRule):
     """Choose a single categorical value and branch on if the variable is that value or not"""
 
     @staticmethod
-    def get_split_value(available_splitting_values, **kwargs):
+    def get_split_value(available_splitting_values, y=None):
         split_value = None
         if available_splitting_values.size > 1 and not np.all(
             available_splitting_values == available_splitting_values[0]
@@ -86,7 +86,7 @@ class SubsetSplitRule(SplitRule):
     """
 
     @staticmethod
-    def get_split_value(available_splitting_values, **kwargs):
+    def get_split_value(available_splitting_values, y=None):
         split_value = None
         if available_splitting_values.size > 1 and not np.all(
             available_splitting_values == available_splitting_values[0]
@@ -106,107 +106,62 @@ class SubsetSplitRule(SplitRule):
 
 class TargetMeanSplitRule(SplitRule):
     """
-    Target mean encoding split rule for categorical variables.
-    
-    This approach orders categorical values by their mean target value,
-    then finds an optimal split point in this ordered sequence.
-    This is similar to the approach used in LightGBM and CatBoost for
-    categorical features.
-    
-    The split divides categories into two groups based on whether their
-    mean target value is below or above a threshold.
+    Choose a split based on ordering categorical values by their target mean.
     """
 
     @staticmethod
-    def get_split_value(available_splitting_values, idx_data_points=None, Y=None, sum_trees=None):
+    def get_split_value(available_splitting_values, y=None):
         """
-        Compute split value based on target mean encoding.
+        Returns a subset of categories forming the left branch.
         
         Parameters
         ----------
         available_splitting_values : np.ndarray
-            Array of categorical values at this node
-        idx_data_points : np.ndarray, optional
-            Indices of data points at this node
-        Y : np.ndarray, optional
-            Full target array
-        sum_trees : np.ndarray, optional
-            Current sum of trees predictions (for residuals)
-            
-        Returns
-        -------
-        split_value : np.ndarray or None
-            Array of categories that should go to the left child
+            Category values at this node
+        y : np.ndarray, optional
+            Target values corresponding to the same rows. If None, falls back to SubsetSplitRule.
         """
-        split_value = None
+        if y is None:
+            # Fall back to random subset splitting if no y provided
+            return SubsetSplitRule.get_split_value(available_splitting_values)
         
-        # Check if we have all required data
-        if idx_data_points is None or Y is None or sum_trees is None:
-            # Fallback to random split if target information not available
-            if available_splitting_values.size > 1 and not np.all(
-                available_splitting_values == available_splitting_values[0]
-            ):
-                unique_values = np.unique(available_splitting_values)
-                n_unique = len(unique_values)
-                n_left = np.random.randint(1, n_unique)
-                split_value = unique_values[np.random.choice(n_unique, n_left, replace=False)]
-            return split_value
+        # Check input validity
+        if len(y) != len(available_splitting_values):
+            raise ValueError("y must have the same length as available_splitting_values")
         
-        # Check if we have multiple unique values
-        if available_splitting_values.size > 1 and not np.all(
-            available_splitting_values == available_splitting_values[0]
-        ):
-            unique_values = np.unique(available_splitting_values)
-            
-            if len(unique_values) < 2:
-                return None
-            
-            # Compute residuals (what the tree should predict)
-            residuals = Y[idx_data_points] - sum_trees[:, idx_data_points].mean(axis=0)
-            
-            # Compute mean residual for each category
-            category_means = {}
-            for cat in unique_values:
-                mask = available_splitting_values == cat
-                if np.any(mask):
-                    category_means[cat] = np.mean(residuals[mask])
-                else:
-                    category_means[cat] = 0.0
-            
-            # Sort categories by their mean target value
-            sorted_categories = sorted(category_means.items(), key=lambda x: x[1])
-            sorted_cats = np.array([cat for cat, _ in sorted_categories])
-            
-            # Try different split points and choose the best one
-            # (we could use all possible splits or sample a subset)
-            if len(sorted_cats) <= 10:
-                # Try all possible splits for small number of categories
-                n_splits = len(sorted_cats) - 1
-                split_idx = np.random.randint(1, n_splits + 1)
-            else:
-                # For many categories, choose a random split point
-                # (or we could use a more sophisticated criterion)
-                split_idx = np.random.randint(1, len(sorted_cats))
-            
-            split_value = sorted_cats[:split_idx]
+        # Unique categories
+        cats = np.unique(available_splitting_values)
+
+        # Mean target per category
+        means = []
+        for cat in cats:
+            mask = available_splitting_values == cat
+            if np.sum(mask) > 0:
+                cat_mean = y[mask].mean()
+                means.append(cat_mean)
         
+        if len(cats) <= 1:
+            return None
+            
+        means = np.array(means)
+
+        # Order categories by target mean
+        order = np.argsort(means)
+        ordered = cats[order]
+
+        # Choose one prefix split at random
+        if len(ordered) <= 1:
+            return None
+
+        # Randomly choose split point (prefix)
+        k = np.random.randint(1, len(ordered))
+        split_value = ordered[:k]
+
         return split_value
 
     @staticmethod
     def divide(available_splitting_values, split_value):
         """
-        Divide data points based on whether their category is in split_value.
-        
-        Parameters
-        ----------
-        available_splitting_values : np.ndarray
-            Array of categorical values
-        split_value : np.ndarray
-            Array of categories that should go to the left child
-            
-        Returns
-        -------
-        mask : np.ndarray
-            Boolean array indicating which values go left (True) or right (False)
+        Standard subset-division logic.
         """
         return np.isin(available_splitting_values, split_value)
