@@ -67,6 +67,7 @@ class ParticleTree:
         response,
         normal,
         shape,
+        Y=None,  # Добавлен новый параметр
     ) -> bool:
         tree_grew = False
         if self.expansion_nodes:
@@ -88,14 +89,13 @@ class ParticleTree:
                     response,
                     normal,
                     shape,
+                    Y,  # Передаем Y в grow_tree
                 )
                 if idx_new_nodes is not None:
                     self.expansion_nodes.extend(idx_new_nodes)
                     tree_grew = True
 
         return tree_grew
-
-
 class PGBART(ArrayStepShared):
     """
     Particle Gibss BART sampling step.
@@ -336,6 +336,25 @@ class PGBART(ArrayStepShared):
             return Competence.COMPATIBLE
         return Competence.INCOMPATIBLE
 
+def get_target_values_for_split(
+    sum_trees: npt.NDArray, 
+    idx_data_points: npt.NDArray, 
+    Y: npt.NDArray,
+    response: str
+) -> npt.NDArray:
+    """
+    Get target values for TargetMeanSplitRule.
+    
+    For categorical split rules, we use the actual target values (Y)
+    to find splits that maximize separation between category groups.
+    """
+    if idx_data_points.size == 0:
+        return np.array([])
+    
+    # For categorical splits, use the actual target values
+    # This helps find splits that best separate the target variable
+    return Y[idx_data_points]
+
 
 def compute_prior_probability(alpha: int, beta: int) -> list[float]:
     """
@@ -385,6 +404,7 @@ def grow_tree(
     response,
     normal,
     shape,
+    Y=None,  # Добавлен новый параметр для target values
 ):
     current_node = tree.get_node(index_leaf_node)
     idx_data_points = current_node.idx_data_points
@@ -397,35 +417,24 @@ def grow_tree(
 
     split_rule = tree.split_rules[selected_predictor]
 
-    # Добавлено: Логика для TargetMeanSplitRule
-    if isinstance(split_rule, TargetMeanSplitRule):
-        # Вычисляем y_for_split как среднее по residuals (sum_trees)
-        y_for_split = np.mean(sum_trees[:, :, idx_data_points], axis=(0, 1)) if shape > 1 else sum_trees[0, 0, idx_data_points]
-
-        unique_cats = np.unique(available_splitting_values)
-        if len(unique_cats) <= 1:
-            return None
-
-        encoded = np.zeros_like(available_splitting_values, dtype=float)
-        global_mean = np.mean(y_for_split)
-        alpha = split_rule.smoothing_alpha  # Используем smoothing_alpha из правила
-
-        for cat in unique_cats:
-            mask = (available_splitting_values == cat)
-            cat_mean = np.mean(y_for_split[mask]) if mask.sum() > 0 else global_mean
-            n = mask.sum()
-            smoothed_mean = (n * cat_mean + alpha * global_mean) / (n + alpha)
-            encoded[mask] = smoothed_mean
-
-        split_value = np.mean(encoded)
-        to_left = encoded <= split_value
+    # Для TargetMeanSplitRule передаем target values
+    target_values = None
+    if split_rule.__name__ == 'TargetMeanSplitRule':  # Проверяем по имени класса
+        if Y is not None:
+            target_values = get_target_values_for_split(
+                sum_trees, idx_data_points, Y, response
+            )
+    
+    # Передаем target_values в get_split_value если это TargetMeanSplitRule
+    if split_rule.__name__ == 'TargetMeanSplitRule' and target_values is not None:
+        split_value = split_rule.get_split_value(available_splitting_values, target_values)
     else:
-        # Стандартная логика для других правил
         split_value = split_rule.get_split_value(available_splitting_values)
-        if split_value is None:
-            return None
-        to_left = split_rule.divide(available_splitting_values, split_value)
 
+    if split_value is None:
+        return None
+
+    to_left = split_rule.divide(available_splitting_values, split_value)
     new_idx_data_points = idx_data_points[to_left], idx_data_points[~to_left]
 
     current_node_children = (
