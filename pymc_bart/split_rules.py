@@ -76,6 +76,50 @@ class OneHotSplitRule(SplitRule):
     def divide(available_splitting_values, split_value):
         return available_splitting_values == split_value
 
+class TargetMeanSplitRule(SplitRule):
+    """
+    Choose a split based on ordering categorical values by their target mean.
+    NOTE: requires passing y explicitly in get_split_value, unlike built-in rules.
+    """
+
+    @staticmethod
+    def get_split_value(available_splitting_values, y):
+        """
+        Returns a subset of categories forming the left branch.
+
+        available_splitting_values : np.ndarray of category values at this node
+        y : np.ndarray target values corresponding to the same rows
+        """
+
+        # Unique categories
+        cats, inv = np.unique(available_splitting_values, return_inverse=True)
+
+        # Mean target per category
+        means = np.array([
+            y[inv == i].mean() if np.sum(inv == i) > 0 else 0.0
+            for i in range(len(cats))
+        ])
+
+        # Order categories by target mean
+        order = np.argsort(means)
+        ordered = cats[order]
+
+        # Choose one prefix split at random
+        if len(ordered) <= 1:
+            return None
+
+        # Randomly choose split point (prefix)
+        k = np.random.randint(1, len(ordered))
+        split_value = ordered[:k]
+
+        return split_value
+
+    @staticmethod
+    def divide(available_splitting_values, split_value):
+        """
+        Standard subset-division logic.
+        """
+        return np.isin(available_splitting_values, split_value)
 
 class SubsetSplitRule(SplitRule):
     """
