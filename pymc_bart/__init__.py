@@ -15,7 +15,7 @@ import pymc as pm
 
 from pymc_bart.bart import BART
 from pymc_bart.pgbart import PGBART
-from pymc_bart.split_rules import ContinuousSplitRule, OneHotSplitRule, SubsetSplitRule
+from pymc_bart.split_rules import ContinuousSplitRule, OneHotSplitRule, SubsetSplitRule, TargetMeanSplitRule
 from pymc_bart.utils import (
     compute_variable_importance,
     get_variable_inclusion,
@@ -34,6 +34,7 @@ __all__ = [
     "ContinuousSplitRule",
     "OneHotSplitRule",
     "SubsetSplitRule",
+    "TargetMeanSplitRule",
     "compute_variable_importance",
     "get_variable_inclusion",
     "plot_convergence",
