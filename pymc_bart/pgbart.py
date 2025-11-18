@@ -28,7 +28,7 @@ from pytensor import function as pytensor_function
 from pytensor.tensor.variable import Variable
 
 from pymc_bart.bart import BARTRV
-from pymc_bart.split_rules import ContinuousSplitRule
+from pymc_bart.split_rules import ContinuousSplitRule, TargetMeanSplitRule
 from pymc_bart.tree import (
     Node,
     Tree,
@@ -67,7 +67,7 @@ class ParticleTree:
         response,
         normal,
         shape,
-        Y=None,  # Добавлен новый параметр
+        Y,
     ) -> bool:
         tree_grew = False
         if self.expansion_nodes:
@@ -89,13 +89,15 @@ class ParticleTree:
                     response,
                     normal,
                     shape,
-                    Y,  # Передаем Y в grow_tree
+                    Y,
                 )
                 if idx_new_nodes is not None:
                     self.expansion_nodes.extend(idx_new_nodes)
                     tree_grew = True
 
         return tree_grew
+
+
 class PGBART(ArrayStepShared):
     """
     Particle Gibss BART sampling step.
@@ -248,12 +250,12 @@ class PGBART(ArrayStepShared):
         shared = make_shared_replacements(initial_point, [value_bart], model)
         self.likelihood_logp = logp(initial_point, [model.datalogp], [value_bart], shared)
         self.all_particles = [
-            [ParticleTree(self.a_tree) for _ in range(self.trees_shape)]
-            for _ in range(num_particles)
+            [ParticleTree(self.a_tree) for _ in range(self.m)] for _ in range(self.trees_shape)
         ]
-        self.selected_trees = [0] * self.trees_shape
-
-        super().__init__([value_bart], shared, **kwargs)
+        self.all_trees = np.array([[p.tree for p in pl] for pl in self.all_particles])
+        self.lower = 0
+        self.iter = 0
+        super().__init__([value_bart], shared)
 
     def astep(self, _):
         variable_inclusion = np.zeros(self.num_variates, dtype="int")
@@ -270,6 +272,7 @@ class PGBART(ArrayStepShared):
                     self.sum_trees[odim] - self.all_particles[odim][tree_id].tree._predict()
                 )
                 # Generate an initial set of particles
+                # at the end we return one of these particles as the new tree
                 particles = self.init_particles(tree_id, odim)
 
                 while True:
@@ -288,7 +291,7 @@ class PGBART(ArrayStepShared):
                             self.response,
                             self.normal,
                             self.leaves_shape,
-                            self.Y,  # Передаем self.Y в sample_tree
+                            self.Y,
                         ):
                             self.update_weight(p, odim)
                         if p.expansion_nodes:
@@ -339,33 +342,149 @@ class PGBART(ArrayStepShared):
 
         stats = {"variable_inclusion": variable_inclusion, "tune": self.tune}
         return self.sum_trees, [stats]
+
+    def normalize(self, particles: list[ParticleTree]) -> float:
+        """
+        Use softmax to get normalized_weights.
+        """
+        log_w = np.array([p.log_weight for p in particles])
+        log_w_max = log_w.max()
+        log_w_ = log_w - log_w_max
+        wei = np.exp(log_w_) + 1e-12
+        return wei / wei.sum()
+
+    def resample(
+        self, particles: list[ParticleTree], normalized_weights: npt.NDArray
+    ) -> list[ParticleTree]:
+        """
+        Use systematic resample for all but the first particle
+
+        Ensure particles are copied only if needed.
+        """
+        new_indices = self.systematic(normalized_weights) + 1
+        seen: list[int] = []
+        new_particles: list[ParticleTree] = []
+        for idx in new_indices:
+            if idx in seen:
+                new_particles.append(particles[idx].copy())
+            else:
+                new_particles.append(particles[idx])
+                seen.append(int(idx))
+
+        particles[1:] = new_particles
+
+        return particles
+
+    def get_particle_tree(
+        self, particles: list[ParticleTree], normalized_weights: npt.NDArray
+    ) -> tuple[ParticleTree, Tree]:
+        """
+        Sample a new particle and associated tree
+        """
+        new_index = self.systematic(normalized_weights)[
+            discrete_uniform_sampler(self.num_particles)
+        ]
+        new_particle = particles[new_index]
+
+        return new_particle, new_particle.tree
+
+    def systematic(self, normalized_weights: npt.NDArray) -> npt.NDArray[np.int_]:
+        """
+        Systematic resampling.
+
+        Return indices in the range 0, ..., len(normalized_weights)
+
+        Note: adapted from https://github.com/nchopin/particles
+        """
+        lnw = len(normalized_weights)
+        single_uniform = (self.uniform.rvs() + np.arange(lnw)) / lnw
+        return inverse_cdf(single_uniform, normalized_weights)
+
+    def init_particles(self, tree_id: int, odim: int) -> list[ParticleTree]:
+        """Initialize particles."""
+        p0: ParticleTree = self.all_particles[odim][tree_id]
+        # The old tree does not grow so we update the weight only once
+        self.update_weight(p0, odim)
+        particles: list[ParticleTree] = [p0]
+
+        particles.extend(ParticleTree(self.a_tree) for _ in self.indices)
+        return particles
+
+    def update_weight(self, particle: ParticleTree, odim: int) -> None:
+        """
+        Update the weight of a particle.
+        """
+
+        delta = (
+            np.identity(self.trees_shape)[odim][:, None, None]
+            * particle.tree._predict()[None, :, :]
+        )
+
+        new_likelihood = self.likelihood_logp((self.sum_trees_noi + delta).flatten())
+        particle.log_weight = new_likelihood
+
     @staticmethod
-    def competence(var: TensorVariable, has_grad: bool) -> Competence:
-        if var.owner is None:
-            return Competence.INCOMPATIBLE
-        op = var.owner.op
-        if isinstance(op, BARTRV):
-            return Competence.COMPATIBLE
+    def competence(var: pm.Distribution, has_grad: bool) -> Competence:
+        """PGBART is only suitable for BART distributions."""
+        dist = getattr(var.owner, "op", None)
+        if isinstance(dist, BARTRV):
+            return Competence.IDEAL
         return Competence.INCOMPATIBLE
 
-def get_target_values_for_split(
-    sum_trees: npt.NDArray, 
-    idx_data_points: npt.NDArray, 
-    Y: npt.NDArray,
-    response: str
-) -> npt.NDArray:
-    """
-    Get target values for TargetMeanSplitRule.
-    
-    For categorical split rules, we use the actual target values (Y)
-    to find splits that maximize separation between category groups.
-    """
-    if idx_data_points.size == 0:
-        return np.array([])
-    
-    # For categorical splits, use the actual target values
-    # This helps find splits that best separate the target variable
-    return Y[idx_data_points]
+    @staticmethod
+    def _make_update_stats_functions():
+        def update_stats(step_stats):
+            return {key: step_stats[key] for key in ("variable_inclusion", "tune")}
+
+        return (update_stats,)
+
+
+class RunningSd:
+    """Welford's online algorithm for computing the variance/standard deviation"""
+
+    def __init__(self, shape: tuple[int, ...]) -> None:
+        self.count = 0  # number of data points
+        self.mean = np.zeros(shape)  # running mean
+        self.m_2 = np.zeros(shape)  # running second moment
+
+    def update(self, new_value: npt.NDArray) -> float | npt.NDArray:
+        self.count = self.count + 1
+        self.mean, self.m_2, std = _update(self.count, self.mean, self.m_2, new_value)
+        return fast_mean(std)
+
+
+@njit
+def _update(
+    count: int,
+    mean: npt.NDArray,
+    m_2: npt.NDArray,
+    new_value: npt.NDArray,
+) -> tuple[npt.NDArray, npt.NDArray, float | npt.NDArray]:
+    delta = new_value - mean
+    mean += delta / count
+    delta2 = new_value - mean
+    m_2 += delta * delta2
+
+    std = (m_2 / count) ** 0.5
+    return mean, m_2, std
+
+
+class SampleSplittingVariable:
+    def __init__(self, alpha_vec: npt.NDArray) -> None:
+        """
+        Sample splitting variables proportional to `alpha_vec`.
+
+        This is equivalent to compute the posterior mean of a Dirichlet-Multinomial model.
+        This enforce sparsity.
+        """
+        self.enu = list(enumerate(np.cumsum(alpha_vec / alpha_vec.sum())))
+
+    def rvs(self) -> int | tuple[int, float]:
+        rnd: float = np.random.random()
+        for i, val in self.enu:
+            if rnd <= val:
+                return i
+        return self.enu[-1]
 
 
 def compute_prior_probability(alpha: int, beta: int) -> list[float]:
@@ -391,18 +510,6 @@ def compute_prior_probability(alpha: int, beta: int) -> list[float]:
     return prior_leaf_prob
 
 
-class SampleSplittingVariable:
-    def __init__(self, alpha_vec: npt.NDArray):
-        self.enu = list(enumerate(np.cumsum(alpha_vec / alpha_vec.sum())))
-
-    def rvs(self) -> int | tuple[int, float]:
-        rnd: float = np.random.random()
-        for i, val in self.enu:
-            if rnd <= val:
-                return i
-        return self.enu[-1]
-
-
 def grow_tree(
     tree,
     index_leaf_node,
@@ -416,7 +523,7 @@ def grow_tree(
     response,
     normal,
     shape,
-    Y=None,  # Добавлен новый параметр для target values
+    Y,
 ):
     current_node = tree.get_node(index_leaf_node)
     idx_data_points = current_node.idx_data_points
@@ -429,19 +536,16 @@ def grow_tree(
 
     split_rule = tree.split_rules[selected_predictor]
 
-    # Для TargetMeanSplitRule передаем target values
-    target_values = None
-    if split_rule.__name__ == 'TargetMeanSplitRule':  # Проверяем по имени класса
-        if Y is not None:
-            target_values = get_target_values_for_split(
-                sum_trees, idx_data_points, Y, response
-            )
+    # Pass additional kwargs for TargetMeanSplitRule
+    split_kwargs = {}
+    if split_rule is TargetMeanSplitRule:
+        split_kwargs = {
+            'idx_data_points': idx_data_points,
+            'Y': Y,
+            'sum_trees': sum_trees,
+        }
     
-    # Передаем target_values в get_split_value если это TargetMeanSplitRule
-    if split_rule.__name__ == 'TargetMeanSplitRule' and target_values is not None:
-        split_value = split_rule.get_split_value(available_splitting_values, target_values)
-    else:
-        split_value = split_rule.get_split_value(available_splitting_values)
+    split_value = split_rule.get_split_value(available_splitting_values, **split_kwargs)
 
     if split_value is None:
         return None
@@ -695,16 +799,3 @@ def logp(
     function = pytensor_function([inarray0], out_list[0])
     function.trust_input = True
     return function
-
-
-class RunningSd:
-    def __init__(self, shape):
-        self.n = 0
-        self.mean = np.zeros(shape)
-        self.var = np.zeros(shape)
-
-    def update(self, x):
-        self.n += 1
-        old_mean = self.mean.copy()
-        self.mean = old_mean + (x - old_mean) / self.n
-        self.var = self.var + (x - old_mean) * (x - self.mean)
