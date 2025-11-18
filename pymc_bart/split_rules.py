@@ -90,7 +90,7 @@ class TargetMeanSplitRule(SplitRule):
     
     # Иначе используем логику на основе y
     # ... ваша реализация ...
-        else:
+        
         cats, inv = np.unique(available_splitting_values, return_inverse=True)
 
         # Mean target per category
