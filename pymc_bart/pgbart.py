@@ -255,78 +255,90 @@ class PGBART(ArrayStepShared):
 
         super().__init__([value_bart], shared, **kwargs)
 
-    def astep(self, q0: npt.NDArray):
-        variable_inclusion = [[] for _ in range(self.trees_shape)]
+    def astep(self, _):
+        variable_inclusion = np.zeros(self.num_variates, dtype="int")
 
-        if self.tune:
-            batch = self.batch[0]
-        else:
-            batch = self.batch[1]
+        upper = min(self.lower + self.batch[not self.tune], self.m)
+        tree_ids = range(self.lower, upper)
+        self.lower = upper if upper < self.m else 0
 
-        for t_dim in range(self.trees_shape):
-            # Update all_particles
-            for p in range(1, self.num_particles):
-                self.all_particles[p][t_dim] = self.all_particles[0][t_dim].copy()
+        for odim in range(self.trees_shape):
+            for tree_id in tree_ids:
+                self.iter += 1
+                # Compute the sum of trees without the old tree that we are attempting to replace
+                self.sum_trees_noi[odim] = (
+                    self.sum_trees[odim] - self.all_particles[odim][tree_id].tree._predict()
+                )
+                # Generate an initial set of particles
+                particles = self.init_particles(tree_id, odim)
 
-            # Sample new trees
-            for _ in range(batch):
-                for p in range(self.num_particles):
-                    self.all_particles[p][t_dim].sample_tree(
-                        self.ssv,
-                        self.available_predictors,
-                        self.prior_prob_leaf_node,
-                        self.X,
-                        self.missing_data,
-                        self.sum_trees_noi[t_dim],
-                        self.leaf_sd[t_dim],
-                        self.m,
-                        self.response,
-                        self.normal,
-                        self.leaves_shape,
-                    )
+                while True:
+                    # Sample each particle (try to grow each tree), except for the first one
+                    stop_growing = True
+                    for p in particles[1:]:
+                        if p.sample_tree(
+                            self.ssv,
+                            self.available_predictors,
+                            self.prior_prob_leaf_node,
+                            self.X,
+                            self.missing_data,
+                            self.sum_trees[odim],
+                            self.leaf_sd[odim],
+                            self.m,
+                            self.response,
+                            self.normal,
+                            self.leaves_shape,
+                            self.Y,  # Передаем self.Y в sample_tree
+                        ):
+                            self.update_weight(p, odim)
+                        if p.expansion_nodes:
+                            stop_growing = False
+                    if stop_growing:
+                        break
 
-            # Compute log_weights
-            log_weights = np.zeros(self.num_particles)
-            for p in range(self.num_particles):
-                self.all_particles[p][t_dim].output = self.all_particles[p][t_dim]._predict()
-                log_weights[p] = self.likelihood_logp(self.sum_trees_noi[t_dim] + self.all_particles[p][t_dim].output)
+                    # Normalize weights
+                    normalized_weights = self.normalize(particles[1:])
 
-            # Normalize log_weights
-            log_weights -= np.max(log_weights)
-            weights = np.exp(log_weights)
-            weights /= weights.sum()
+                    # Resample
+                    particles = self.resample(particles, normalized_weights)
 
-            # Resample particles
-            new_indices = inverse_cdf(self.uniform.rvs(size=self.num_particles), weights)
-            new_particles = [self.all_particles[i][t_dim].copy() for i in new_indices]
+                normalized_weights = self.normalize(particles)
+                # Get the new particle and associated tree
+                self.all_particles[odim][tree_id], new_tree = self.get_particle_tree(
+                    particles, normalized_weights
+                )
+                # Update the sum of trees
+                new = new_tree._predict()
+                self.sum_trees[odim] = self.sum_trees_noi[odim] + new
+                # To reduce memory usage, we trim the tree
+                self.all_trees[odim][tree_id] = new_tree.trim()
 
-            self.all_particles = new_particles
+                if self.tune:
+                    # Update the splitting variable and the splitting variable sampler
+                    if self.iter > self.m:
+                        self.ssv = SampleSplittingVariable(self.alpha_vec)
 
-            # Select tree
-            self.selected_trees[t_dim] = np.random.choice(range(self.num_particles))
+                    for index in new_tree.get_split_variables():
+                        self.alpha_vec[index] += 1
 
-            # Update sum_trees
-            self.sum_trees[t_dim] = self.sum_trees_noi[t_dim] + self.all_particles[self.selected_trees[t_dim]].output
+                    # update standard deviation at leaf nodes
+                    if self.iter > 2:
+                        self.leaf_sd[odim] = self.running_sd[odim].update(new)
+                    else:
+                        self.running_sd[odim].update(new)
 
-            # Update running_sd
-            self.running_sd[t_dim].update(self.all_particles[self.selected_trees[t_dim]].output)
+                else:
+                    # update the variable inclusion
+                    for index in new_tree.get_split_variables():
+                        variable_inclusion[index] += 1
 
-            # Update variable_inclusion
-            for tree in self.all_trees[t_dim]:
-                for var in tree.get_split_variables():
-                    variable_inclusion[t_dim].append(var)
+        if not self.tune:
+            self.bart.all_trees.append(self.all_trees)
 
-        # Update all_trees
-        for t_dim in range(self.trees_shape):
-            self.all_trees[t_dim].append(self.all_particles[self.selected_trees[t_dim]].trim())
+        variable_inclusion = _encode_vi(variable_inclusion)
 
-        stats = {
-            "variable_inclusion": _encode_vi(variable_inclusion),
-            "tune": self.tune,
-        }
-
-        return q0, stats
-
+        stats = {"variable_inclusion": variable_inclusion, "tune": self.tune}
+        return self.sum_trees, [stats]
     @staticmethod
     def competence(var: TensorVariable, has_grad: bool) -> Competence:
         if var.owner is None:
