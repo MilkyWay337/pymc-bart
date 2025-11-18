@@ -94,8 +94,7 @@ class TargetMeanSplitRule(SplitRule):
     Кодирует категории по mean Y (с smoothing), затем split_value = mean по encoded.
     Divide: encoded <= split_value vs. > (эффективно разделяет группы категорий).
     """
-    def __init__(self, smoothing_alpha=1.0):
-        self.smoothing_alpha = smoothing_alpha
+    
 
     def get_split_value(self, available_splitting_values, y_values=None):
         if available_splitting_values.size <= 1:
