@@ -83,15 +83,14 @@ class TargetMeanSplitRule(SplitRule):
     """
 
     @staticmethod
-    def get_split_value(available_splitting_values, y):
-        """
-        Returns a subset of categories forming the left branch.
-
-        available_splitting_values : np.ndarray of category values at this node
-        y : np.ndarray target values corresponding to the same rows
-        """
-
-        # Unique categories
+    def get_split_value(available_splitting_values, y=None):
+        if y is None:
+        # Если y не предоставлен, ведем себя как случайное правило
+            return SubsetSplitRule.get_split_value(available_splitting_values)
+    
+    # Иначе используем логику на основе y
+    # ... ваша реализация ...
+        else:
         cats, inv = np.unique(available_splitting_values, return_inverse=True)
 
         # Mean target per category
