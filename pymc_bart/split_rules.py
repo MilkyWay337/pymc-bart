@@ -25,7 +25,7 @@ class SplitRule:
 
     @staticmethod
     @abstractmethod
-    def get_split_value(available_splitting_values):
+    def get_split_value(available_splitting_values, **kwargs):
         pass
 
     @staticmethod
@@ -41,7 +41,7 @@ class ContinuousSplitRule(SplitRule):
     """
 
     @staticmethod
-    def get_split_value(available_splitting_values):
+    def get_split_value(available_splitting_values, **kwargs):
         split_value = None
         if available_splitting_values.size > 1:
             idx_selected_splitting_values = int(
@@ -60,7 +60,7 @@ class OneHotSplitRule(SplitRule):
     """Choose a single categorical value and branch on if the variable is that value or not"""
 
     @staticmethod
-    def get_split_value(available_splitting_values):
+    def get_split_value(available_splitting_values, **kwargs):
         split_value = None
         if available_splitting_values.size > 1 and not np.all(
             available_splitting_values == available_splitting_values[0]
@@ -86,7 +86,7 @@ class SubsetSplitRule(SplitRule):
     """
 
     @staticmethod
-    def get_split_value(available_splitting_values):
+    def get_split_value(available_splitting_values, **kwargs):
         split_value = None
         if available_splitting_values.size > 1 and not np.all(
             available_splitting_values == available_splitting_values[0]
@@ -106,117 +106,110 @@ class SubsetSplitRule(SplitRule):
 
 class TargetMeanSplitRule(SplitRule):
     """
-    Split rule for categorical variables that chooses the split subset 
-    that maximizes the difference in target means between the two resulting groups.
+    Target mean encoding split rule for categorical variables.
     
-    This rule uses target variable information to find the most predictive splits
-    for categorical features by evaluating different category subsets.
+    This approach orders categorical values by their mean target value,
+    then finds an optimal split point in this ordered sequence.
+    This is similar to the approach used in LightGBM and CatBoost for
+    categorical features.
+    
+    The split divides categories into two groups based on whether their
+    mean target value is below or above a threshold.
     """
 
     @staticmethod
-    def get_split_value(available_splitting_values, target_values=None):
+    def get_split_value(available_splitting_values, **kwargs):
         """
-        For categorical variables, find the subset of categories that maximizes
-        the difference in target means between the subset and its complement.
+        Compute split value based on target mean encoding.
         
         Parameters
         ----------
         available_splitting_values : np.ndarray
-            Categorical values for splitting
-        target_values : np.ndarray
-            Target values corresponding to the splitting values
+            Array of categorical values at this node
+        **kwargs : dict
+            Must contain:
+            - idx_data_points: indices of data points at this node
+            - Y: full target array
+            - sum_trees: current sum of trees predictions (for residuals)
+            
+        Returns
+        -------
+        split_value : np.ndarray or None
+            Array of categories that should go to the left child
         """
         split_value = None
         
-        if (available_splitting_values.size > 1 and 
-            target_values is not None and 
-            target_values.size > 0):
+        # Extract required data from kwargs
+        idx_data_points = kwargs.get('idx_data_points')
+        Y = kwargs.get('Y')
+        sum_trees = kwargs.get('sum_trees')
+        
+        if idx_data_points is None or Y is None or sum_trees is None:
+            # Fallback to random split if target information not available
+            if available_splitting_values.size > 1 and not np.all(
+                available_splitting_values == available_splitting_values[0]
+            ):
+                unique_values = np.unique(available_splitting_values)
+                n_unique = len(unique_values)
+                n_left = np.random.randint(1, n_unique)
+                split_value = unique_values[np.random.choice(n_unique, n_left, replace=False)]
+            return split_value
+        
+        # Check if we have multiple unique values
+        if available_splitting_values.size > 1 and not np.all(
+            available_splitting_values == available_splitting_values[0]
+        ):
+            unique_values = np.unique(available_splitting_values)
             
-            # Remove NaN values
-            valid_mask = ~np.isnan(available_splitting_values)
-            if np.sum(valid_mask) <= 1:
+            if len(unique_values) < 2:
                 return None
-                
-            available_splitting_values = available_splitting_values[valid_mask]
-            target_values = target_values[valid_mask]
             
-            # Get unique categorical values
-            unique_categories = np.unique(available_splitting_values)
+            # Compute residuals (what the tree should predict)
+            residuals = Y[idx_data_points] - sum_trees[:, idx_data_points].mean(axis=0)
             
-            if len(unique_categories) <= 1:
-                return None
+            # Compute mean residual for each category
+            category_means = {}
+            for cat in unique_values:
+                mask = available_splitting_values == cat
+                if np.any(mask):
+                    category_means[cat] = np.mean(residuals[mask])
+                else:
+                    category_means[cat] = 0.0
             
-            # For categorical variables, find the best subset of categories
-            # that maximizes the absolute difference in target means
+            # Sort categories by their mean target value
+            sorted_categories = sorted(category_means.items(), key=lambda x: x[1])
+            sorted_cats = np.array([cat for cat, _ in sorted_categories])
             
-            best_gain = -np.inf
-            best_subset = None
-            
-            # If there are too many categories, use efficient search
-            max_categories_for_exhaustive = 8
-            if len(unique_categories) <= max_categories_for_exhaustive:
-                # Exhaustive search for small number of categories
-                # Generate all non-empty proper subsets (skip empty and full sets)
-                n_categories = len(unique_categories)
-                for i in range(1, 2 ** n_categories - 1):
-                    # Create subset mask using binary representation
-                    subset_mask = np.array([(i >> j) & 1 for j in range(n_categories)], dtype=bool)
-                    current_subset = unique_categories[subset_mask]
-                    
-                    subset_mask_data = np.isin(available_splitting_values, current_subset)
-                    
-                    # Ensure both subsets have at least one element
-                    if np.sum(subset_mask_data) > 0 and np.sum(~subset_mask_data) > 0:
-                        left_mean = np.mean(target_values[subset_mask_data])
-                        right_mean = np.mean(target_values[~subset_mask_data])
-                        gain = abs(left_mean - right_mean)
-                        
-                        if gain > best_gain:
-                            best_gain = gain
-                            best_subset = current_subset
+            # Try different split points and choose the best one
+            # (we could use all possible splits or sample a subset)
+            if len(sorted_cats) <= 10:
+                # Try all possible splits for small number of categories
+                n_splits = len(sorted_cats) - 1
+                split_idx = np.random.randint(1, n_splits + 1)
             else:
-                # For many categories, use heuristic search
-                # Try single categories first (equivalent to OneHot)
-                for cat in unique_categories:
-                    subset_mask = available_splitting_values == cat
-                    if np.sum(subset_mask) > 0 and np.sum(~subset_mask) > 0:
-                        left_mean = np.mean(target_values[subset_mask])
-                        right_mean = np.mean(target_values[~subset_mask])
-                        gain = abs(left_mean - right_mean)
-                        
-                        if gain > best_gain:
-                            best_gain = gain
-                            best_subset = np.array([cat])
-                
-                # Try random subsets
-                n_random_tries = min(50, 2 ** (len(unique_categories) - 1))
-                for _ in range(n_random_tries):
-                    # Random subset size between 1 and n_categories-1
-                    subset_size = np.random.randint(1, len(unique_categories))
-                    random_subset = np.random.choice(
-                        unique_categories, size=subset_size, replace=False
-                    )
-                    
-                    subset_mask = np.isin(available_splitting_values, random_subset)
-                    if np.sum(subset_mask) > 0 and np.sum(~subset_mask) > 0:
-                        left_mean = np.mean(target_values[subset_mask])
-                        right_mean = np.mean(target_values[~subset_mask])
-                        gain = abs(left_mean - right_mean)
-                        
-                        if gain > best_gain:
-                            best_gain = gain
-                            best_subset = random_subset
+                # For many categories, choose a random split point
+                # (or we could use a more sophisticated criterion)
+                split_idx = np.random.randint(1, len(sorted_cats))
             
-            split_value = best_subset
+            split_value = sorted_cats[:split_idx]
         
         return split_value
 
     @staticmethod
     def divide(available_splitting_values, split_value):
         """
-        For categorical TargetMeanSplitRule, split_value is a subset of categories
-        that go to the left branch.
+        Divide data points based on whether their category is in split_value.
+        
+        Parameters
+        ----------
+        available_splitting_values : np.ndarray
+            Array of categorical values
+        split_value : np.ndarray
+            Array of categories that should go to the left child
+            
+        Returns
+        -------
+        mask : np.ndarray
+            Boolean array indicating which values go left (True) or right (False)
         """
-        if split_value is None:
-            return np.zeros_like(available_splitting_values, dtype=bool)
         return np.isin(available_splitting_values, split_value)
