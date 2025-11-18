@@ -56,6 +56,40 @@ class ContinuousSplitRule(SplitRule):
         return available_splitting_values <= split_value
 
 
+
+class TargetMeanCategoricalSplitRule(SplitRule):
+    """
+    Custom categorical split rule based on ordering categories by target mean.
+    """
+
+    def __init__(self, min_leaf_size=5):
+        self.min_leaf_size = min_leaf_size
+
+    def find_splits(self, x, y):
+        import numpy as np
+
+        cats, inv = np.unique(x, return_inverse=True)
+        means = np.array([
+            y[inv == i].mean() if (inv == i).sum() > 0 else 0
+            for i in range(len(cats))
+        ])
+
+        # order by target mean
+        order = np.argsort(means)
+        ordered_cats = cats[order]
+
+        splits = []
+        k = len(cats)
+        for i in range(1, k):
+            left = ordered_cats[:i]
+            mask = np.isin(x, left)
+            if mask.sum() >= self.min_leaf_size and (~mask).sum() >= self.min_leaf_size:
+                splits.append(set(left))
+
+        return splits
+
+
+
 class OneHotSplitRule(SplitRule):
     """Choose a single categorical value and branch on if the variable is that value or not"""
 
