@@ -536,16 +536,16 @@ def grow_tree(
 
     split_rule = tree.split_rules[selected_predictor]
 
-    # Pass additional kwargs for TargetMeanSplitRule
-    split_kwargs = {}
+    # Pass additional parameters for TargetMeanSplitRule
     if split_rule is TargetMeanSplitRule:
-        split_kwargs = {
-            'idx_data_points': idx_data_points,
-            'Y': Y,
-            'sum_trees': sum_trees,
-        }
-    
-    split_value = split_rule.get_split_value(available_splitting_values, **split_kwargs)
+        split_value = split_rule.get_split_value(
+            available_splitting_values,
+            idx_data_points=idx_data_points,
+            Y=Y,
+            sum_trees=sum_trees,
+        )
+    else:
+        split_value = split_rule.get_split_value(available_splitting_values)
 
     if split_value is None:
         return None
