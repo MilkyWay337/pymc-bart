@@ -18,11 +18,14 @@ import numpy as np
 from numba import njit
 
 
-
 class SplitRule:
+    """
+    Abstract template class for a split rule
+    """
+
     @staticmethod
     @abstractmethod
-    def get_split_value(available_splitting_values, y_values=None):
+    def get_split_value(available_splitting_values, y_values=None):  # Изменено: добавлен y_values=None
         pass
 
     @staticmethod
@@ -38,7 +41,7 @@ class ContinuousSplitRule(SplitRule):
     """
 
     @staticmethod
-    def get_split_value(available_splitting_values, y_values=None):
+    def get_split_value(available_splitting_values, y_values=None):  # Добавлен y_values=None
         split_value = None
         if available_splitting_values.size > 1:
             idx_selected_splitting_values = int(
@@ -57,7 +60,7 @@ class OneHotSplitRule(SplitRule):
     """Choose a single categorical value and branch on if the variable is that value or not"""
 
     @staticmethod
-    def get_split_value(available_splitting_values, y_values=None):
+    def get_split_value(available_splitting_values, y_values=None):  # Добавлен y_values=None
         split_value = None
         if available_splitting_values.size > 1 and not np.all(
             available_splitting_values == available_splitting_values[0]
@@ -73,6 +76,7 @@ class OneHotSplitRule(SplitRule):
     def divide(available_splitting_values, split_value):
         return available_splitting_values == split_value
 
+
 class SubsetSplitRule(SplitRule):
     """
     Choose a random subset of the categorical values and branch on belonging to that set.
@@ -82,7 +86,7 @@ class SubsetSplitRule(SplitRule):
     """
 
     @staticmethod
-    def get_split_value(available_splitting_values, y_values=None):
+    def get_split_value(available_splitting_values, y_values=None):  # Добавлен y_values=None
         split_value = None
         if available_splitting_values.size > 1 and not np.all(
             available_splitting_values == available_splitting_values[0]
@@ -99,6 +103,7 @@ class SubsetSplitRule(SplitRule):
     def divide(available_splitting_values, split_value):
         return np.isin(available_splitting_values, split_value)
 
+# Новый класс (добавлен)
 class TargetMeanSplitRule(SplitRule):
     """
     Упрощённый split rule на основе target encoding только для categorical признаков.
