@@ -1,17 +1,7 @@
-#   Copyright 2022 The PyMC Developers
-#
-#   Licensed under the Apache License, Version 2.0 (the "License");
-#   you may not use this file except in compliance with the License.
-#   You may obtain a copy of the License at
-#
-#       http://www.apache.org/licenses/LICENSE-2.0
-#
-#   Unless required by applicable law or agreed to in writing, software
-#   distributed under the License is distributed on an "AS IS" BASIS,
-#   WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-#   See the License for the specific language governing permissions and
-#   limitations under the License.
+# В файле pgbart.py (исправленная версия для передачи y_values)
 
+import warnings
+from multiprocessing import Manager
 
 import numpy as np
 import numpy.typing as npt
@@ -27,16 +17,16 @@ from pytensor import config
 from pytensor import function as pytensor_function
 from pytensor.tensor.variable import Variable
 
-from pymc_bart.bart import BARTRV
-from pymc_bart.split_rules import ContinuousSplitRule, TargetMeanSplitRule  # Добавлен импорт
-from pymc_bart.tree import (
+from .bart import BARTRV
+from .split_rules import ContinuousSplitRule, TargetMeanSplitRule  # Импорт
+from .tree import (
     Node,
     Tree,
     get_depth,
     get_idx_left_child,
     get_idx_right_child,
 )
-from pymc_bart.utils import _encode_vi
+from .utils import _encode_vi
 
 
 class ParticleTree:
@@ -98,7 +88,7 @@ class ParticleTree:
 
 class PGBART(ArrayStepShared):
     """
-    Particle Gibss BART sampling step.
+    Particle Gibbs BART sampling step.
 
     Parameters
     ----------
@@ -248,14 +238,14 @@ class PGBART(ArrayStepShared):
         shared = make_shared_replacements(initial_point, [value_bart], model)
         self.likelihood_logp = logp(initial_point, [model.datalogp], [value_bart], shared)
         self.all_particles = [
-            [ParticleTree(separate_trees=self.bart.separate_trees) for _ in range(self.trees_shape)]
+            [ParticleTree(self.a_tree) for _ in range(self.trees_shape)]
             for _ in range(num_particles)
         ]
         self.selected_trees = [0] * self.trees_shape
 
         super().__init__([value_bart], shared, **kwargs)
 
-# ... (остальной код PGBART без изменений)
+    # ... (остальной код класса PGBART)
 
 def grow_tree(
     tree,
@@ -282,34 +272,14 @@ def grow_tree(
 
     split_rule = tree.split_rules[selected_predictor]
 
-    # Добавлено: Логика для TargetMeanSplitRule
-    if isinstance(split_rule, TargetMeanSplitRule):
-        # Вычисляем y_for_split как среднее по residuals (sum_trees)
-        y_for_split = np.mean(sum_trees[:, :, idx_data_points], axis=(0, 1)) if shape > 1 else sum_trees[0, 0, idx_data_points]
+    # Добавлено: передача y_values
+    y_for_split = np.mean(sum_trees[:, :, idx_data_points], axis=(0, 1)) if shape > 1 else sum_trees[0, 0, idx_data_points]
 
-        unique_cats = np.unique(available_splitting_values)
-        if len(unique_cats) <= 1:
-            return None
+    split_value = split_rule.get_split_value(available_splitting_values, y_for_split)
+    if split_value is None:
+        return None
 
-        encoded = np.zeros_like(available_splitting_values, dtype=float)
-        global_mean = np.mean(y_for_split)
-        alpha = split_rule.smoothing_alpha  # Используем smoothing_alpha из правила
-
-        for cat in unique_cats:
-            mask = (available_splitting_values == cat)
-            cat_mean = np.mean(y_for_split[mask]) if mask.sum() > 0 else global_mean
-            n = mask.sum()
-            smoothed_mean = (n * cat_mean + alpha * global_mean) / (n + alpha)
-            encoded[mask] = smoothed_mean
-
-        split_value = np.mean(encoded)
-        to_left = encoded <= split_value
-    else:
-        # Стандартная логика для других правил
-        split_value = split_rule.get_split_value(available_splitting_values)
-        if split_value is None:
-            return None
-        to_left = split_rule.divide(available_splitting_values, split_value)
+    to_left = split_rule.divide(available_splitting_values, split_value)
 
     new_idx_data_points = idx_data_points[to_left], idx_data_points[~to_left]
 
@@ -343,4 +313,4 @@ def grow_tree(
     tree.grow_leaf_node(current_node, selected_predictor, split_value, index_leaf_node)
     return current_node_children
 
-# ... (остальной код pgbart.py без изменений: filter_missing_values, draw_leaf_value и т.д.)
+# ... (остальной код pgbart.py)
