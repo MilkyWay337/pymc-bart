@@ -107,19 +107,13 @@ class SubsetSplitRule(SplitRule):
 class TargetMeanSplitRule(SplitRule):
     """
     Choose a split based on ordering categorical values by their target mean.
+    Modified to be fully compatible with OneHotSplitRule and SubsetSplitRule.
     """
 
     @staticmethod
     def get_split_value(available_splitting_values, y=None):
         """
         Returns a subset of categories forming the left branch.
-        
-        Parameters
-        ----------
-        available_splitting_values : np.ndarray
-            Category values at this node
-        y : np.ndarray, optional
-            Target values corresponding to the same rows. If None, falls back to SubsetSplitRule.
         """
         if y is None:
             # Fall back to random subset splitting if no y provided
@@ -162,6 +156,8 @@ class TargetMeanSplitRule(SplitRule):
     @staticmethod
     def divide(available_splitting_values, split_value):
         """
-        Standard subset-division logic.
+        Return boolean array indicating left branch membership for each element.
+        Fully compatible with OneHotSplitRule and SubsetSplitRule.
         """
+        # Используем ту же логику, что и в SubsetSplitRule
         return np.isin(available_splitting_values, split_value)
