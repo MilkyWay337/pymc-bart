@@ -71,7 +71,26 @@ class BARTRV(RandomVariable):
 
 
 bart = BARTRV()
+import numpy as np
+import pymc as pm
 
+def predict_bart(idata, bart_var_name, X_new, model):
+    """
+    Предсказывает значения BART для новых точек X_new.
+    idata: InferenceData после pm.sample()
+    bart_var_name: имя BART-переменной в модели (string)
+    X_new: numpy array или подходящая структура для X
+    model: pm.Model, в котором был создан BART
+
+    Использует MutableData и sample_posterior_predictive под капотом.
+    """
+    # Предположим, что при построении модели вы назвали X как MutableData("X_shared", ...)
+    # Нужно узнать, как называется этот shared
+    # Допустим, "X_shared"
+    pm.set_data({ "X_shared": X_new }, model=model)
+    ppc = pm.sample_posterior_predictive(idata, model=model, var_names=[bart_var_name])
+    samples = ppc[bart_var_name]
+    return samples
 
 class BART(Distribution):
     r"""
