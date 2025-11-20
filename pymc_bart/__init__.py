@@ -20,7 +20,6 @@ from pymc_bart.split_rules import (
     OneHotSplitRule,
     SubsetSplitRule,
     TargetSplitRule,
-    CounterSplitRule,
 )
 from pymc_bart.utils import (
     compute_variable_importance,
@@ -41,7 +40,6 @@ __all__ = [
     "OneHotSplitRule",
     "SubsetSplitRule",
     "TargetSplitRule",
-    "CounterSplitRule",
     "compute_variable_importance",
     "get_variable_inclusion",
     "plot_convergence",
