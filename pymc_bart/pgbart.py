@@ -450,7 +450,7 @@ class PGBART(ArrayStepShared):
         super().__init__([value_bart], shared)
 
     def _initialize_target_encoding_rules(self):
-    """Initialize target encoding rules with appropriate parameters."""
+        """Initialize target encoding rules with appropriate parameters."""
         for i, rule in enumerate(self.split_rules):
             if isinstance(rule, type):
                 if issubclass(rule, TargetEncodingSplitRule):
@@ -465,7 +465,6 @@ class PGBART(ArrayStepShared):
                         prior=1.0,
                         calculation_method="Full"
                     )
-        # Если rule уже является экземпляром, оставляем как есть
     def _get_target_type(self) -> str:
         """Determine target type for encoding."""
         y_unique = np.unique(self.Y)
