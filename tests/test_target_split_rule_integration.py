@@ -1,0 +1,1 @@
+Test script to validate the integration of `TargetSplitRule` with the `BART` class. It generates synthetic data, applies `TargetSplitRule`, and checks the prediction shape.

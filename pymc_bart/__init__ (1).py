@@ -14,13 +14,10 @@
 import pymc as pm
 
 from pymc_bart.bart import BART
+from pymc_bart.decision_table import DecisionTable, DecisionTableNode
+from pymc_bart.mh_sampler import MHDecisionTableSampler
 from pymc_bart.pgbart import PGBART
-from pymc_bart.split_rules import (
-    ContinuousSplitRule,
-    OneHotSplitRule,
-    SubsetSplitRule,
-    TargetSplitRule,
-)
+from pymc_bart.split_rules import ContinuousSplitRule, OneHotSplitRule, SubsetSplitRule
 from pymc_bart.utils import (
     compute_variable_importance,
     get_variable_inclusion,
@@ -36,10 +33,12 @@ from pymc_bart.utils import (
 __all__ = [
     "BART",
     "PGBART",
+    "DecisionTable",
+    "DecisionTableNode",
+    "MHDecisionTableSampler",
     "ContinuousSplitRule",
     "OneHotSplitRule",
     "SubsetSplitRule",
-    "TargetSplitRule",
     "compute_variable_importance",
     "get_variable_inclusion",
     "plot_convergence",
@@ -53,4 +52,4 @@ __all__ = [
 __version__ = "0.11.0"
 
 
-pm.STEP_METHODS = list(pm.STEP_METHODS) + [PGBART]
+pm.STEP_METHODS = list(pm.STEP_METHODS) + [PGBART, MHDecisionTableSampler]

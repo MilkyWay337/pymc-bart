@@ -27,13 +27,8 @@ from pytensor import config
 from pytensor import function as pytensor_function
 from pytensor.tensor.variable import Variable
 
-from pymc_bart.bart import BARTRV, _split_rules_storage
-from pymc_bart.split_rules import (
-    ContinuousSplitRule,
-    TargetSplitRule,
-    OneHotSplitRule,
-    SubsetSplitRule,
-)
+from pymc_bart.bart import BARTRV
+from pymc_bart.split_rules import ContinuousSplitRule
 from pymc_bart.tree import (
     Node,
     Tree,
@@ -72,8 +67,6 @@ class ParticleTree:
         response,
         normal,
         shape,
-        Y=None,
-        all_trees_sum=None,
     ) -> bool:
         tree_grew = False
         if self.expansion_nodes:
@@ -95,8 +88,6 @@ class ParticleTree:
                     response,
                     normal,
                     shape,
-                    Y=Y,
-                    all_trees_sum=all_trees_sum,
                 )
                 if idx_new_nodes is not None:
                     self.expansion_nodes.extend(idx_new_nodes)
@@ -205,26 +196,10 @@ class PGBART(ArrayStepShared):
         if self.bart.split_rules:
             self.split_rules = self.bart.split_rules
         else:
-            # Try to get split_rules from storage
-            split_rules_stored = _split_rules_storage.get(self.bart.name)
-            if split_rules_stored:
-                self.split_rules = split_rules_stored
-            else:
-                self.split_rules = [ContinuousSplitRule() for _ in range(self.X.shape[1])]
-
-        # Instantiate split rule classes if needed
-        for idx, rule in enumerate(self.split_rules):
-            if isinstance(rule, type):
-                # Rule is a class, instantiate it
-                if rule is ContinuousSplitRule:
-                    self.split_rules[idx] = ContinuousSplitRule()
-                elif rule is TargetSplitRule:
-                    self.split_rules[idx] = TargetSplitRule()
-                else:
-                    self.split_rules[idx] = rule()
+            self.split_rules = [ContinuousSplitRule] * self.X.shape[1]
 
         for idx, rule in enumerate(self.split_rules):
-            if isinstance(rule, ContinuousSplitRule):
+            if rule is ContinuousSplitRule:
                 self.X[:, idx] = jitter_duplicated(self.X[:, idx], np.nanstd(self.X[:, idx]))
 
         init_mean = self.Y.mean()
@@ -545,8 +520,6 @@ def grow_tree(
     response,
     normal,
     shape,
-    Y=None,
-    all_trees_sum=None,
 ):
     current_node = tree.get_node(index_leaf_node)
     idx_data_points = current_node.idx_data_points
@@ -559,17 +532,7 @@ def grow_tree(
 
     split_rule = tree.split_rules[selected_predictor]
 
-    # Support for TargetSplitRule and CounterSplitRule
-    if isinstance(split_rule, TargetSplitRule):
-        residuals = Y[idx_data_points] - all_trees_sum[idx_data_points] if all_trees_sum is not None else Y[idx_data_points]
-        split_value = split_rule.get_split_value(
-            available_splitting_values,
-            targets=Y[idx_data_points],
-            residuals=residuals,
-        )
-    else:
-        # Default split rules (ContinuousSplitRule, OneHotSplitRule, SubsetSplitRule)
-        split_value = split_rule.get_split_value(available_splitting_values)
+    split_value = split_rule.get_split_value(available_splitting_values)
 
     if split_value is None:
         return None
