@@ -2,10 +2,12 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pymc as pm
-from typing import List, Optional, Callable, Dict, Any
+import arviz as az
+from typing import List, Optional, Callable, Dict, Any, Union
 from functools import partial
 
 from pymc_bart.split_rules import continuous_split_rule, target_split_rule
+
 
 class BART:
     def __init__(
@@ -37,7 +39,7 @@ class BART:
         
         self.kwargs = kwargs
         self.model = None
-        self.trees = []
+        self.trace = None
         
         self._build_model()
     
@@ -85,60 +87,62 @@ class BART:
     def _build_model(self):
         """Build the BART model with categorical feature support."""
         with pm.Model() as self.model:
-            # Priors for tree parameters
-            tree_depth = pm.Gamma("tree_depth", alpha=self.alpha, beta=self.beta)
+            # Tree parameters
+            tree_parameters = pm.Gamma("tree_parameters", alpha=self.alpha, beta=self.beta, shape=self.m)
             
-            # Convert to JAX arrays
-            X_jax = jnp.array(self.X)
-            Y_jax = jnp.array(self.Y)
+            # Tree outputs
+            tree_outputs = pm.Normal("tree_outputs", 0, 1, shape=self.m)
             
-            # Initialize trees
-            self.trees = []
-            for i in range(self.m):
-                tree_output = pm.Normal(f"tree_{i}", 0, 1 / self.m)
-                
-                # Store tree information with split rules
-                tree_info = {
-                    'output': tree_output,
-                    'split_rules': self.split_rules,
-                    'feature_types': self.feature_types,
-                    'X': X_jax,
-                    'Y': Y_jax
-                }
-                self.trees.append(tree_info)
+            # Store tree information
+            self.tree_info = {
+                'split_rules': self.split_rules,
+                'feature_types': self.feature_types,
+                'X': jnp.array(self.X),
+                'Y': jnp.array(self.Y),
+                'parameters': tree_parameters,
+                'outputs': tree_outputs
+            }
             
-            # Sum of trees
-            tree_sum = sum(tree['output'] for tree in self.trees)
+            # Sum of trees (simplified - actual implementation would use tree structures)
+            tree_sum = pm.Deterministic("tree_sum", jnp.sum(tree_outputs))
             
             # Likelihood
-            y_obs = pm.Normal("y_obs", mu=tree_sum, observed=self.Y)
+            y_obs = pm.Normal("y_obs", mu=tree_sum, sigma=0.1, observed=self.Y)
     
-    def fit(self, n_iter: int = 1000, **kwargs):
+    def fit(self, draws: int = 1000, tune: int = 1000, **kwargs) -> az.InferenceData:
         """Fit the BART model."""
         if self.model is None:
             self._build_model()
         
         with self.model:
-            trace = pm.sample(n_iter, **kwargs)
+            self.trace = pm.sample(draws=draws, tune=tune, **kwargs)
         
-        return trace
+        return self.trace
     
-    def predict(self, X_new: np.ndarray):
+    def predict(self, X_new: np.ndarray) -> np.ndarray:
         """Make predictions using the fitted model."""
-        # This is a simplified version - you'd need to implement
-        # the actual prediction logic using the sampled trees
-        X_new_jax = jnp.array(X_new)
+        if self.trace is None:
+            raise ValueError("Model must be fitted before prediction")
         
-        # Placeholder for prediction logic
-        # In practice, you'd use the sampled trees to make predictions
-        predictions = jnp.zeros(X_new.shape[0])
+        # Simplified prediction - in practice you'd use the actual tree structures
+        # from the trace to make predictions
+        posterior = self.trace.posterior
+        tree_outputs = posterior['tree_outputs'].values
         
-        return np.array(predictions)
+        # Average over chains and draws
+        n_chains, n_draws, n_trees = tree_outputs.shape
+        tree_outputs_flat = tree_outputs.reshape(-1, n_trees)
+        
+        # Simple prediction: sum of average tree outputs
+        avg_tree_outputs = np.mean(tree_outputs_flat, axis=0)
+        predictions = np.full(X_new.shape[0], np.sum(avg_tree_outputs))
+        
+        return predictions
 
-    def _build_tree_structure(self, X, y, split_rules, feature_types, depth=0, max_depth=5):
+    def _build_single_tree(self, X, y, split_rules, feature_types, depth=0, max_depth=5):
         """
-        Recursively build tree structure using appropriate split rules.
-        This is a simplified version for demonstration.
+        Recursively build a single tree structure using appropriate split rules.
+        This is a helper function for tree construction.
         """
         if depth >= max_depth or len(y) < 2:
             return {'leaf': jnp.mean(y)}
@@ -162,9 +166,9 @@ class BART:
         if best_split is None:
             return {'leaf': jnp.mean(y)}
         
-        # Create split
+        # Create split based on feature type
         if feature_types[best_feature] == 'categorical':
-            # For categorical, split based on target-ordered categories
+            # For categorical, we use the computed split value from target statistics
             left_mask = X[:, best_feature] <= best_split
         else:
             # For continuous, normal split
@@ -176,16 +180,59 @@ class BART:
             return {'leaf': jnp.mean(y)}
         
         # Recursively build subtrees
-        left_subtree = self._build_tree_structure(
+        left_subtree = self._build_single_tree(
             X[left_mask], y[left_mask], split_rules, feature_types, depth + 1, max_depth
         )
-        right_subtree = self._build_tree_structure(
+        right_subtree = self._build_single_tree(
             X[right_mask], y[right_mask], split_rules, feature_types, depth + 1, max_depth
         )
         
         return {
             'feature': best_feature,
             'split_value': best_split,
+            'feature_type': feature_types[best_feature],
             'left': left_subtree,
             'right': right_subtree
         }
+
+
+def train_bart_model(
+    X: np.ndarray,
+    y: np.ndarray,
+    feature_types: Optional[List[str]] = None,
+    m: int = 50,
+    alpha: float = 0.95,
+    beta: float = 2.0,
+    draws: int = 1000,
+    tune: int = 1000,
+    **kwargs
+) -> BART:
+    """
+    Convenience function to train a BART model.
+    
+    Args:
+        X: Feature matrix
+        y: Target values
+        feature_types: List of feature types ('continuous' or 'categorical')
+        m: Number of trees
+        alpha: Alpha parameter for tree prior
+        beta: Beta parameter for tree prior
+        draws: Number of posterior draws
+        tune: Number of tuning steps
+    
+    Returns:
+        Trained BART model
+    """
+    bart = BART(
+        X=X,
+        Y=y,
+        feature_types=feature_types,
+        m=m,
+        alpha=alpha,
+        beta=beta,
+        **kwargs
+    )
+    
+    bart.fit(draws=draws, tune=tune)
+    
+    return bart
