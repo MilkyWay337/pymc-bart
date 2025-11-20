@@ -28,7 +28,12 @@ from pytensor import function as pytensor_function
 from pytensor.tensor.variable import Variable
 
 from pymc_bart.bart import BARTRV, _split_rules_storage
-from pymc_bart.split_rules import ContinuousSplitRule, TargetSplitRule, CounterSplitRule
+from pymc_bart.split_rules import (
+    ContinuousSplitRule,
+    TargetSplitRule,
+    OneHotSplitRule,
+    SubsetSplitRule,
+)
 from pymc_bart.tree import (
     Node,
     Tree,
@@ -215,8 +220,6 @@ class PGBART(ArrayStepShared):
                     self.split_rules[idx] = ContinuousSplitRule()
                 elif rule is TargetSplitRule:
                     self.split_rules[idx] = TargetSplitRule()
-                elif rule is CounterSplitRule:
-                    self.split_rules[idx] = CounterSplitRule()
                 else:
                     self.split_rules[idx] = rule()
 
@@ -562,12 +565,7 @@ def grow_tree(
         split_value = split_rule.get_split_value(
             available_splitting_values,
             targets=Y[idx_data_points],
-            residuals=residuals
-        )
-    elif isinstance(split_rule, CounterSplitRule):
-        split_value = split_rule.get_split_value(
-            available_splitting_values,
-            training_categories=X[:, selected_predictor]
+            residuals=residuals,
         )
     else:
         # Default split rules (ContinuousSplitRule, OneHotSplitRule, SubsetSplitRule)
