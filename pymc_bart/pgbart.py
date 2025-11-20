@@ -679,23 +679,23 @@ def grow_tree(
     )
 
     split_rule = tree.split_rules[selected_predictor]
-
-    # For target encoding rules, pass additional parameters
-    if isinstance(split_rule, (TargetEncodingSplitRule, CounterEncodingSplitRule)):
-        # Get current residuals for target encoding
-        current_residuals = sum_trees[:, idx_data_points]
-        
-        if isinstance(split_rule, TargetEncodingSplitRule):
-            split_value = split_rule.get_split_value(
-                available_splitting_values, 
-                targets=tree.Y if hasattr(tree, 'Y') else None,
-                residuals=current_residuals.flatten() if current_residuals.size > 0 else None
-            )
-        else:  # CounterEncodingSplitRule
-            split_value = split_rule.get_split_value(
-                available_splitting_values,
-                training_categories=X[:, selected_predictor] if hasattr(tree, 'X') else None
-            )
+    
+    # TARGET ENCODING
+    if isinstance(split_rule, TargetEncodingSplitRule):
+        split_value = split_rule.get_split_value(
+            available_splitting_values,
+            targets=Y[idx_data_points],        # <--- ВАЖНО: реальные цели
+            residuals=sum_trees[:, idx_data_points].sum(axis=0)
+        )
+    
+    # COUNTER ENCODING
+    elif isinstance(split_rule, CounterEncodingSplitRule):
+        split_value = split_rule.get_split_value(
+            available_splitting_values,
+            training_categories=X[:, selected_predictor]
+        )
+    
+    # DEFAULT (Continuous / OneHot / Subset)
     else:
         split_value = split_rule.get_split_value(available_splitting_values)
 
