@@ -684,26 +684,21 @@ def grow_tree(
     )
 
     split_rule = tree.split_rules[selected_predictor]
-    
-    # TARGET ENCODING - передаем необходимые аргументы
-    if hasattr(split_rule, '__class__') and split_rule.__class__.__name__ == 'TargetEncodingSplitRule':
-        # Вычисляем остатки для target encoding
+    # TargetEncodingSplitRule: передаем targets и residuals
+    if hasattr(split_rule, 'get_split_value') and hasattr(split_rule, 'compute_target_stats'):
         residuals = Y[idx_data_points] - all_trees_sum[idx_data_points] if all_trees_sum is not None else Y[idx_data_points]
-        
         split_value = split_rule.get_split_value(
             available_splitting_values,
             targets=Y[idx_data_points],
             residuals=residuals
         )
-    
-    # COUNTER ENCODING
-    elif hasattr(split_rule, '__class__') and split_rule.__class__.__name__ == 'CounterEncodingSplitRule':
+    # CounterEncodingSplitRule: передаем training_categories
+    elif hasattr(split_rule, 'get_split_value') and hasattr(split_rule, 'compute_counter_stats'):
         split_value = split_rule.get_split_value(
             available_splitting_values,
             training_categories=X[:, selected_predictor]
         )
-    
-    # DEFAULT (Continuous / OneHot / Subset)
+    # Default split rules
     else:
         split_value = split_rule.get_split_value(available_splitting_values)
 

@@ -123,7 +123,12 @@ class BART(Distribution):
     split_rules : Optional[list[SplitRule]], default None
         List of SplitRule objects, one per column in input data.
         Allows using different split rules for different columns. Default is ContinuousSplitRule.
-        Other options are OneHotSplitRule and SubsetSplitRule, both meant for categorical variables.
+        Other options are OneHotSplitRule, SubsetSplitRule, TargetEncodingSplitRule, and CounterEncodingSplitRule.
+        TargetEncodingSplitRule and CounterEncodingSplitRule allow advanced encoding for categorical variables.
+        Пример использования:
+        >>> from pymc_bart.split_rules import CounterEncodingSplitRule, TargetEncodingSplitRule
+        >>> split_rules = [CounterEncodingSplitRule(), TargetEncodingSplitRule()]
+        >>> bart = BART('bart', X, y, split_rules=split_rules)
     separate_trees : Optional[bool], default False
         When training multiple trees (by setting a shape parameter), the default behavior is to
         learn a joint tree structure and only have different leaf values for each.
