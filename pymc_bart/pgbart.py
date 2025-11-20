@@ -27,7 +27,7 @@ from pytensor import config
 from pytensor import function as pytensor_function
 from pytensor.tensor.variable import Variable
 
-from pymc_bart.bart import BARTRV
+from pymc_bart.bart import BARTRV, _split_rules_storage
 from pymc_bart.split_rules import ContinuousSplitRule, TargetSplitRule, CounterSplitRule
 from pymc_bart.tree import (
     Node,
@@ -200,7 +200,12 @@ class PGBART(ArrayStepShared):
         if self.bart.split_rules:
             self.split_rules = self.bart.split_rules
         else:
-            self.split_rules = [ContinuousSplitRule() for _ in range(self.X.shape[1])]
+            # Try to get split_rules from storage
+            split_rules_stored = _split_rules_storage.get(self.bart.name)
+            if split_rules_stored:
+                self.split_rules = split_rules_stored
+            else:
+                self.split_rules = [ContinuousSplitRule() for _ in range(self.X.shape[1])]
 
         # Instantiate split rule classes if needed
         for idx, rule in enumerate(self.split_rules):

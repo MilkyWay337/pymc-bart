@@ -32,6 +32,9 @@ from .utils import TensorLike, _sample_posterior
 
 __all__ = ["BART"]
 
+# Global storage for split_rules per BART instance
+_split_rules_storage = {}
+
 
 class BARTRV(RandomVariable):
     """Base class for BART."""
@@ -162,7 +165,6 @@ class BART(Distribution):
                 "alpha": alpha,
                 "beta": beta,
                 "split_prior": split_prior,
-                "split_rules": split_rules,
                 "separate_trees": separate_trees,
             },
         )()
@@ -174,6 +176,10 @@ class BART(Distribution):
             return cls.get_moment(rv, size, *rv_inputs)
 
         cls.rv_op = bart_op
+        
+        # Store split_rules for later use in PGBART
+        _split_rules_storage[name] = split_rules
+        
         params = [X, Y, m, alpha, beta]
         return super().__new__(cls, name, *params, **kwargs)
 
