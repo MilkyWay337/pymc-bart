@@ -12,6 +12,7 @@
 #   See the License for the specific language governing permissions and
 #   limitations under the License.
 
+
 import numpy as np
 import numpy.typing as npt
 import pymc as pm
@@ -27,7 +28,7 @@ from pytensor import function as pytensor_function
 from pytensor.tensor.variable import Variable
 
 from pymc_bart.bart import BARTRV
-from pymc_bart.split_rules import ContinuousSplitRule, TargetEncodingSplitRule, CounterEncodingSplitRule
+from pymc_bart.split_rules import ContinuousSplitRule
 from pymc_bart.tree import (
     Node,
     Tree,
@@ -66,15 +67,13 @@ class ParticleTree:
         response,
         normal,
         shape,
-        Y=None,  # Добавляем Y
-        all_trees_sum=None,  # Добавляем сумму всех деревьев
     ) -> bool:
         tree_grew = False
         if self.expansion_nodes:
             index_leaf_node = self.expansion_nodes.pop(0)
             # Probability that this node will remain a leaf node
             prob_leaf = prior_prob_leaf_node[get_depth(index_leaf_node)]
-    
+
             if prob_leaf < np.random.random():
                 idx_new_nodes = grow_tree(
                     self.tree,
@@ -89,200 +88,12 @@ class ParticleTree:
                     response,
                     normal,
                     shape,
-                    Y=Y,  # Передаем Y
-                    all_trees_sum=all_trees_sum,  # Передаем сумму деревьев
                 )
                 if idx_new_nodes is not None:
                     self.expansion_nodes.extend(idx_new_nodes)
                     tree_grew = True
-    
+
         return tree_grew
-
-@njit
-def _update(
-    count: int,
-    mean: npt.NDArray,
-    m_2: npt.NDArray,
-    new_value: npt.NDArray,
-) -> tuple[npt.NDArray, npt.NDArray, float | npt.NDArray]:
-    """Welford's online algorithm update step"""
-    delta = new_value - mean
-    mean += delta / count
-    delta2 = new_value - mean
-    m_2 += delta * delta2
-
-    std = (m_2 / count) ** 0.5
-    return mean, m_2, std
-
-
-@njit
-def fast_mean(ari: npt.NDArray) -> float | npt.NDArray:
-    """Use Numba to speed up the computation of the mean."""
-    if ari.ndim == 1:
-        count = ari.shape[0]
-        suma = 0
-        for i in range(count):
-            suma += ari[i]
-        return suma / count
-    else:
-        res = np.zeros(ari.shape[0])
-        count = ari.shape[1]
-        for j in range(ari.shape[0]):
-            for i in range(count):
-                res[j] += ari[j, i]
-        return res / count
-
-
-class RunningSd:
-    """Welford's online algorithm for computing the variance/standard deviation"""
-
-    def __init__(self, shape: tuple[int, ...]) -> None:
-        self.count = 0  # number of data points
-        self.mean = np.zeros(shape)  # running mean
-        self.m_2 = np.zeros(shape)  # running second moment
-
-    def update(self, new_value: npt.NDArray) -> float | npt.NDArray:
-        self.count = self.count + 1
-        self.mean, self.m_2, std = _update(self.count, self.mean, self.m_2, new_value)
-        return fast_mean(std)
-
-
-@njit
-def inverse_cdf(
-    single_uniform: npt.NDArray, normalized_weights: npt.NDArray
-) -> npt.NDArray[np.int_]:
-    """
-    Inverse CDF algorithm for a finite distribution.
-
-    Parameters
-    ----------
-    single_uniform: npt.NDArray
-        Ordered points in [0,1]
-
-    normalized_weights: npt.NDArray)
-        Normalized weights
-
-    Returns
-    -------
-    new_indices: ndarray
-        a vector of indices in range 0, ..., len(normalized_weights)
-
-    Note: adapted from https://github.com/nchopin/particles
-    """
-    idx = 0
-    a_weight = normalized_weights[0]
-    sul = len(single_uniform)
-    new_indices = np.empty(sul, dtype=np.int64)
-    for i in range(sul):
-        while single_uniform[i] > a_weight:
-            idx += 1
-            a_weight += normalized_weights[idx]
-        new_indices[i] = idx
-    return new_indices
-
-
-def discrete_uniform_sampler(upper_value):
-    """Draw from the uniform distribution with bounds [0, upper_value)."""
-    return int(np.random.random() * upper_value)
-
-
-@njit
-def jitter_duplicated(array: npt.NDArray, std: float) -> npt.NDArray:
-    """
-    Jitter duplicated values.
-    """
-    # Simplified version for testing
-    return array
-
-
-def compute_prior_probability(alpha: float, beta: float) -> list[float]:
-    """
-    Calculate the probability of the node being a leaf node (1 - p(being split node)).
-
-    Parameters
-    ----------
-    alpha : float
-    beta: float
-
-    Returns
-    -------
-    list with probabilities for leaf nodes
-    """
-    prior_leaf_prob: list[float] = [0]
-    depth = 0
-    while prior_leaf_prob[-1] < 0.9999:
-        prior_leaf_prob.append(1 - (alpha * ((1 + depth) ** (-beta))))
-        depth += 1
-    prior_leaf_prob.append(1)
-
-    return prior_leaf_prob
-
-
-class SampleSplittingVariable:
-    def __init__(self, alpha_vec: npt.NDArray) -> None:
-        """
-        Sample splitting variables proportional to `alpha_vec`.
-
-        This is equivalent to compute the posterior mean of a Dirichlet-Multinomial model.
-        This enforce sparsity.
-        """
-        self.enu = list(enumerate(np.cumsum(alpha_vec / alpha_vec.sum())))
-
-    def rvs(self) -> int | tuple[int, float]:
-        rnd: float = np.random.random()
-        for i, val in self.enu:
-            if rnd <= val:
-                return i
-        return self.enu[-1]
-
-
-class NormalSampler:
-    """Cache samples from a standard normal distribution."""
-
-    def __init__(self, scale, shape):
-        self.size = 1000
-        self.scale = scale
-        self.shape = shape
-        self.update()
-
-    def rvs(self):
-        if self.idx == self.size:
-            self.update()
-        pop = self.cache[:, self.idx]
-        self.idx += 1
-        return pop
-
-    def update(self):
-        self.idx = 0
-        self.cache = np.random.normal(loc=0.0, scale=self.scale, size=(self.shape, self.size))
-
-
-class UniformSampler:
-    """Cache samples from a uniform distribution."""
-
-    def __init__(self, lower_bound, upper_bound, shape=None):
-        self.size = 1000
-        self.upper_bound = upper_bound
-        self.lower_bound = lower_bound
-        self.shape = shape
-        self.update()
-
-    def rvs(self):
-        if self.idx == self.size:
-            self.update()
-        if self.shape is None:
-            pop = self.cache[self.idx]
-        else:
-            pop = self.cache[:, self.idx]
-        self.idx += 1
-        return pop
-
-    def update(self):
-        self.idx = 0
-        if self.shape is None:
-            self.cache = np.random.uniform(self.lower_bound, self.upper_bound, size=self.size)
-        else:
-            self.cache = np.random.uniform(self.lower_bound, self.upper_bound, size=(self.shape, self.size))
 
 
 class PGBART(ArrayStepShared):
@@ -387,11 +198,8 @@ class PGBART(ArrayStepShared):
         else:
             self.split_rules = [ContinuousSplitRule] * self.X.shape[1]
 
-        # Initialize target encoding rules with parameters
-        self._initialize_target_encoding_rules()
-
         for idx, rule in enumerate(self.split_rules):
-            if isinstance(rule, type) and issubclass(rule, ContinuousSplitRule):
+            if rule is ContinuousSplitRule:
                 self.X[:, idx] = jitter_duplicated(self.X[:, idx], np.nanstd(self.X[:, idx]))
 
         init_mean = self.Y.mean()
@@ -405,10 +213,8 @@ class PGBART(ArrayStepShared):
         y_unique = np.unique(self.Y)
         if y_unique.size == 2 and np.all(y_unique == [0, 1]):
             self.leaf_sd *= 3 / self.m**0.5
-            self.target_type = "binary"
         else:
             self.leaf_sd *= self.Y.std() / self.m**0.5
-            self.target_type = "regression" if len(y_unique) > 10 else "multiclass"
 
         self.running_sd = [
             RunningSd((self.leaves_shape, self.num_observations)) for _ in range(self.trees_shape)
@@ -449,39 +255,13 @@ class PGBART(ArrayStepShared):
         self.iter = 0
         super().__init__([value_bart], shared)
 
-    def _initialize_target_encoding_rules(self):
-        """Initialize target encoding rules with appropriate parameters."""
-        for i, rule in enumerate(self.split_rules):
-            if isinstance(rule, type):
-                if issubclass(rule, TargetEncodingSplitRule):
-                    self.split_rules[i] = TargetEncodingSplitRule(
-                        prior=1.0,
-                        noise_level=0.01,
-                        target_type=self._get_target_type(),
-                        n_buckets=10
-                    )
-                elif issubclass(rule, CounterEncodingSplitRule):
-                    self.split_rules[i] = CounterEncodingSplitRule(
-                        prior=1.0,
-                        calculation_method="Full"
-                    )
-    def _get_target_type(self) -> str:
-        """Determine target type for encoding."""
-        y_unique = np.unique(self.Y)
-        if len(y_unique) == 2 and np.all(y_unique == [0, 1]):
-            return "binary"
-        elif len(y_unique) > 10:
-            return "regression"
-        else:
-            return "multiclass"
-
     def astep(self, _):
         variable_inclusion = np.zeros(self.num_variates, dtype="int")
-    
+
         upper = min(self.lower + self.batch[not self.tune], self.m)
         tree_ids = range(self.lower, upper)
         self.lower = upper if upper < self.m else 0
-    
+
         for odim in range(self.trees_shape):
             for tree_id in tree_ids:
                 self.iter += 1
@@ -490,8 +270,9 @@ class PGBART(ArrayStepShared):
                     self.sum_trees[odim] - self.all_particles[odim][tree_id].tree._predict()
                 )
                 # Generate an initial set of particles
+                # at the end we return one of these particles as the new tree
                 particles = self.init_particles(tree_id, odim)
-    
+
                 while True:
                     # Sample each particle (try to grow each tree), except for the first one
                     stop_growing = True
@@ -508,21 +289,19 @@ class PGBART(ArrayStepShared):
                             self.response,
                             self.normal,
                             self.leaves_shape,
-                            Y=self.Y,  # Передаем Y
-                            all_trees_sum=self.sum_trees_noi[odim],  # Передаем сумму деревьев без текущего
                         ):
                             self.update_weight(p, odim)
                         if p.expansion_nodes:
                             stop_growing = False
                     if stop_growing:
                         break
-    
+
                     # Normalize weights
                     normalized_weights = self.normalize(particles[1:])
-    
+
                     # Resample
                     particles = self.resample(particles, normalized_weights)
-    
+
                 normalized_weights = self.normalize(particles)
                 # Get the new particle and associated tree
                 self.all_particles[odim][tree_id], new_tree = self.get_particle_tree(
@@ -533,34 +312,34 @@ class PGBART(ArrayStepShared):
                 self.sum_trees[odim] = self.sum_trees_noi[odim] + new
                 # To reduce memory usage, we trim the tree
                 self.all_trees[odim][tree_id] = new_tree.trim()
-    
+
                 if self.tune:
                     # Update the splitting variable and the splitting variable sampler
                     if self.iter > self.m:
                         self.ssv = SampleSplittingVariable(self.alpha_vec)
-    
+
                     for index in new_tree.get_split_variables():
                         self.alpha_vec[index] += 1
-    
+
                     # update standard deviation at leaf nodes
                     if self.iter > 2:
                         self.leaf_sd[odim] = self.running_sd[odim].update(new)
                     else:
                         self.running_sd[odim].update(new)
-    
+
                 else:
                     # update the variable inclusion
                     for index in new_tree.get_split_variables():
                         variable_inclusion[index] += 1
-    
+
         if not self.tune:
             self.bart.all_trees.append(self.all_trees)
-    
+
         variable_inclusion = _encode_vi(variable_inclusion)
-    
+
         stats = {"variable_inclusion": variable_inclusion, "tune": self.tune}
         return self.sum_trees, [stats]
-        
+
     def normalize(self, particles: list[ParticleTree]) -> float:
         """
         Use softmax to get normalized_weights.
@@ -657,6 +436,77 @@ class PGBART(ArrayStepShared):
         return (update_stats,)
 
 
+class RunningSd:
+    """Welford's online algorithm for computing the variance/standard deviation"""
+
+    def __init__(self, shape: tuple[int, ...]) -> None:
+        self.count = 0  # number of data points
+        self.mean = np.zeros(shape)  # running mean
+        self.m_2 = np.zeros(shape)  # running second moment
+
+    def update(self, new_value: npt.NDArray) -> float | npt.NDArray:
+        self.count = self.count + 1
+        self.mean, self.m_2, std = _update(self.count, self.mean, self.m_2, new_value)
+        return fast_mean(std)
+
+
+@njit
+def _update(
+    count: int,
+    mean: npt.NDArray,
+    m_2: npt.NDArray,
+    new_value: npt.NDArray,
+) -> tuple[npt.NDArray, npt.NDArray, float | npt.NDArray]:
+    delta = new_value - mean
+    mean += delta / count
+    delta2 = new_value - mean
+    m_2 += delta * delta2
+
+    std = (m_2 / count) ** 0.5
+    return mean, m_2, std
+
+
+class SampleSplittingVariable:
+    def __init__(self, alpha_vec: npt.NDArray) -> None:
+        """
+        Sample splitting variables proportional to `alpha_vec`.
+
+        This is equivalent to compute the posterior mean of a Dirichlet-Multinomial model.
+        This enforce sparsity.
+        """
+        self.enu = list(enumerate(np.cumsum(alpha_vec / alpha_vec.sum())))
+
+    def rvs(self) -> int | tuple[int, float]:
+        rnd: float = np.random.random()
+        for i, val in self.enu:
+            if rnd <= val:
+                return i
+        return self.enu[-1]
+
+
+def compute_prior_probability(alpha: int, beta: int) -> list[float]:
+    """
+    Calculate the probability of the node being a leaf node (1 - p(being split node)).
+
+    Parameters
+    ----------
+    alpha : float
+    beta: float
+
+    Returns
+    -------
+    list with probabilities for leaf nodes
+    """
+    prior_leaf_prob: list[float] = [0]
+    depth = 0
+    while prior_leaf_prob[-1] < 0.9999:
+        prior_leaf_prob.append(1 - (alpha * ((1 + depth) ** (-beta))))
+        depth += 1
+    prior_leaf_prob.append(1)
+
+    return prior_leaf_prob
+
+
 def grow_tree(
     tree,
     index_leaf_node,
@@ -670,8 +520,6 @@ def grow_tree(
     response,
     normal,
     shape,
-    Y=None,  # Добавляем Y как аргумент
-    all_trees_sum=None,  # Добавляем сумму всех деревьев
 ):
     current_node = tree.get_node(index_leaf_node)
     idx_data_points = current_node.idx_data_points
@@ -683,23 +531,8 @@ def grow_tree(
     )
 
     split_rule = tree.split_rules[selected_predictor]
-    # TargetEncodingSplitRule: передаем targets и residuals
-    if hasattr(split_rule, 'get_split_value') and hasattr(split_rule, 'compute_target_stats'):
-        residuals = Y[idx_data_points] - all_trees_sum[idx_data_points] if all_trees_sum is not None else Y[idx_data_points]
-        split_value = split_rule.get_split_value(
-            available_splitting_values,
-            targets=Y[idx_data_points],
-            residuals=residuals
-        )
-    # CounterEncodingSplitRule: передаем training_categories
-    elif hasattr(split_rule, 'get_split_value') and hasattr(split_rule, 'compute_counter_stats'):
-        split_value = split_rule.get_split_value(
-            available_splitting_values,
-            training_categories=X[:, selected_predictor]
-        )
-    # Default split rules
-    else:
-        split_value = split_rule.get_split_value(available_splitting_values)
+
+    split_value = split_rule.get_split_value(available_splitting_values)
 
     if split_value is None:
         return None
@@ -771,6 +604,24 @@ def draw_leaf_value(
 
 
 @njit
+def fast_mean(ari: npt.NDArray) -> float | npt.NDArray:
+    """Use Numba to speed up the computation of the mean."""
+    if ari.ndim == 1:
+        count = ari.shape[0]
+        suma = 0
+        for i in range(count):
+            suma += ari[i]
+        return suma / count
+    else:
+        res = np.zeros(ari.shape[0])
+        count = ari.shape[1]
+        for j in range(ari.shape[0]):
+            for i in range(count):
+                res[j] += ari[j, i]
+        return res / count
+
+
+@njit
 def fast_linear_fit(
     x: npt.NDArray,
     y: npt.NDArray,
@@ -797,6 +648,121 @@ def fast_linear_fit(
 
     y_fit = np.expand_dims(a, axis=1) + np.expand_dims(b, axis=1) * x
     return y_fit.T, [a, b]
+
+
+def discrete_uniform_sampler(upper_value):
+    """Draw from the uniform distribution with bounds [0, upper_value).
+
+    This is the same and np.random.randit(upper_value) but faster.
+    """
+    return int(np.random.random() * upper_value)
+
+
+class NormalSampler:
+    """Cache samples from a standard normal distribution."""
+
+    def __init__(self, scale, shape):
+        self.size = 1000
+        self.scale = scale
+        self.shape = shape
+        self.update()
+
+    def rvs(self):
+        if self.idx == self.size:
+            self.update()
+        pop = self.cache[:, self.idx]
+        self.idx += 1
+        return pop
+
+    def update(self):
+        self.idx = 0
+        self.cache = np.random.normal(loc=0.0, scale=self.scale, size=(self.shape, self.size))
+
+
+class UniformSampler:
+    """Cache samples from a uniform distribution."""
+
+    def __init__(self, lower_bound, upper_bound, shape=None):
+        self.size = 1000
+        self.upper_bound = upper_bound
+        self.lower_bound = lower_bound
+        self.shape = shape
+        self.update()
+
+    def rvs(self):
+        if self.idx == self.size:
+            self.update()
+        if self.shape is None:
+            pop = self.cache[self.idx]
+        else:
+            pop = self.cache[:, self.idx]
+        self.idx += 1
+        return pop
+
+    def update(self):
+        self.idx = 0
+        if self.shape is None:
+            self.cache = np.random.uniform(self.lower_bound, self.upper_bound, size=self.size)
+        else:
+            self.cache = np.random.uniform(
+                self.lower_bound, self.upper_bound, size=(self.shape, self.size)
+            )
+
+
+@njit
+def inverse_cdf(
+    single_uniform: npt.NDArray, normalized_weights: npt.NDArray
+) -> npt.NDArray[np.int_]:
+    """
+    Inverse CDF algorithm for a finite distribution.
+
+    Parameters
+    ----------
+    single_uniform: npt.NDArray
+        Ordered points in [0,1]
+
+    normalized_weights: npt.NDArray)
+        Normalized weights
+
+    Returns
+    -------
+    new_indices: ndarray
+        a vector of indices in range 0, ..., len(normalized_weights)
+
+    Note: adapted from https://github.com/nchopin/particles
+    """
+    idx = 0
+    a_weight = normalized_weights[0]
+    sul = len(single_uniform)
+    new_indices = np.empty(sul, dtype=np.int64)
+    for i in range(sul):
+        while single_uniform[i] > a_weight:
+            idx += 1
+            a_weight += normalized_weights[idx]
+        new_indices[i] = idx
+    return new_indices
+
+
+@njit
+def jitter_duplicated(array: npt.NDArray, std: float) -> npt.NDArray:
+    """
+    Jitter duplicated values.
+    """
+    if are_whole_number(array):
+        seen = []
+        for idx, num in enumerate(array):
+            if num in seen and not np.isnan(num):
+                array[idx] = num + np.random.normal(0, std / 12)
+            else:
+                seen.append(num)
+
+    return array
+
+
+@njit
+def are_whole_number(array: npt.NDArray) -> np.bool_:
+    """Check if all values in array are whole numbers"""
+    return np.all(np.mod(array[~np.isnan(array)], 1) == 0)
 
 
 def logp(
