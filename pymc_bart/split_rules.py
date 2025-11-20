@@ -213,11 +213,12 @@ class TargetSplitRule(SplitRule):
         
         # Convert categorical to numerical using encoding
         numerical_values = np.array([self.encoding_map[x] for x in available_splitting_values])
+        unique_values = np.unique(numerical_values)
         
         # Use continuous split on encoded values
-        if len(np.unique(numerical_values)) > 1:
-            idx = int(np.random.random() * len(numerical_values))
-            return numerical_values[idx]
+        if len(unique_values) > 1:
+            idx = int(np.random.random() * len(unique_values))
+            return unique_values[idx]
         
         return None
 
@@ -351,10 +352,11 @@ class CounterSplitRule(SplitRule):
         )
         
         numerical_values = np.array([self.encoding_map[x] for x in available_splitting_values])
+        unique_values = np.unique(numerical_values)
         
-        if len(np.unique(numerical_values)) > 1:
-            idx = int(np.random.random() * len(numerical_values))
-            return numerical_values[idx]
+        if len(unique_values) > 1:
+            idx = int(np.random.random() * len(unique_values))
+            return unique_values[idx]
         
         return None
 

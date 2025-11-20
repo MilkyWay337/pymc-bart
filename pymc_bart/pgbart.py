@@ -200,10 +200,23 @@ class PGBART(ArrayStepShared):
         if self.bart.split_rules:
             self.split_rules = self.bart.split_rules
         else:
-            self.split_rules = [ContinuousSplitRule] * self.X.shape[1]
+            self.split_rules = [ContinuousSplitRule() for _ in range(self.X.shape[1])]
+
+        # Instantiate split rule classes if needed
+        for idx, rule in enumerate(self.split_rules):
+            if isinstance(rule, type):
+                # Rule is a class, instantiate it
+                if rule is ContinuousSplitRule:
+                    self.split_rules[idx] = ContinuousSplitRule()
+                elif rule is TargetSplitRule:
+                    self.split_rules[idx] = TargetSplitRule()
+                elif rule is CounterSplitRule:
+                    self.split_rules[idx] = CounterSplitRule()
+                else:
+                    self.split_rules[idx] = rule()
 
         for idx, rule in enumerate(self.split_rules):
-            if rule is ContinuousSplitRule:
+            if isinstance(rule, ContinuousSplitRule):
                 self.X[:, idx] = jitter_duplicated(self.X[:, idx], np.nanstd(self.X[:, idx]))
 
         init_mean = self.Y.mean()
