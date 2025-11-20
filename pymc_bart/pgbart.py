@@ -66,13 +66,15 @@ class ParticleTree:
         response,
         normal,
         shape,
+        Y=None,  # Добавляем Y
+        all_trees_sum=None,  # Добавляем сумму всех деревьев
     ) -> bool:
         tree_grew = False
         if self.expansion_nodes:
             index_leaf_node = self.expansion_nodes.pop(0)
             # Probability that this node will remain a leaf node
             prob_leaf = prior_prob_leaf_node[get_depth(index_leaf_node)]
-
+    
             if prob_leaf < np.random.random():
                 idx_new_nodes = grow_tree(
                     self.tree,
@@ -87,13 +89,14 @@ class ParticleTree:
                     response,
                     normal,
                     shape,
+                    Y=Y,  # Передаем Y
+                    all_trees_sum=all_trees_sum,  # Передаем сумму деревьев
                 )
                 if idx_new_nodes is not None:
                     self.expansion_nodes.extend(idx_new_nodes)
                     tree_grew = True
-
+    
         return tree_grew
-
 
 @njit
 def _update(
@@ -447,23 +450,22 @@ class PGBART(ArrayStepShared):
         super().__init__([value_bart], shared)
 
     def _initialize_target_encoding_rules(self):
-        """Initialize target encoding rules with appropriate parameters."""
+    """Initialize target encoding rules with appropriate parameters."""
         for i, rule in enumerate(self.split_rules):
-            if isinstance(rule, type) and issubclass(rule, (TargetEncodingSplitRule, CounterEncodingSplitRule)):
-                # Replace class with instance and set parameters
-                if rule == TargetEncodingSplitRule:
+            if isinstance(rule, type):
+                if issubclass(rule, TargetEncodingSplitRule):
                     self.split_rules[i] = TargetEncodingSplitRule(
                         prior=1.0,
                         noise_level=0.01,
                         target_type=self._get_target_type(),
                         n_buckets=10
                     )
-                elif rule == CounterEncodingSplitRule:
+                elif issubclass(rule, CounterEncodingSplitRule):
                     self.split_rules[i] = CounterEncodingSplitRule(
                         prior=1.0,
                         calculation_method="Full"
                     )
-
+        # Если rule уже является экземпляром, оставляем как есть
     def _get_target_type(self) -> str:
         """Determine target type for encoding."""
         y_unique = np.unique(self.Y)
@@ -476,11 +478,11 @@ class PGBART(ArrayStepShared):
 
     def astep(self, _):
         variable_inclusion = np.zeros(self.num_variates, dtype="int")
-
+    
         upper = min(self.lower + self.batch[not self.tune], self.m)
         tree_ids = range(self.lower, upper)
         self.lower = upper if upper < self.m else 0
-
+    
         for odim in range(self.trees_shape):
             for tree_id in tree_ids:
                 self.iter += 1
@@ -489,9 +491,8 @@ class PGBART(ArrayStepShared):
                     self.sum_trees[odim] - self.all_particles[odim][tree_id].tree._predict()
                 )
                 # Generate an initial set of particles
-                # at the end we return one of these particles as the new tree
                 particles = self.init_particles(tree_id, odim)
-
+    
                 while True:
                     # Sample each particle (try to grow each tree), except for the first one
                     stop_growing = True
@@ -508,19 +509,21 @@ class PGBART(ArrayStepShared):
                             self.response,
                             self.normal,
                             self.leaves_shape,
+                            Y=self.Y,  # Передаем Y
+                            all_trees_sum=self.sum_trees_noi[odim],  # Передаем сумму деревьев без текущего
                         ):
                             self.update_weight(p, odim)
                         if p.expansion_nodes:
                             stop_growing = False
                     if stop_growing:
                         break
-
+    
                     # Normalize weights
                     normalized_weights = self.normalize(particles[1:])
-
+    
                     # Resample
                     particles = self.resample(particles, normalized_weights)
-
+    
                 normalized_weights = self.normalize(particles)
                 # Get the new particle and associated tree
                 self.all_particles[odim][tree_id], new_tree = self.get_particle_tree(
@@ -531,34 +534,34 @@ class PGBART(ArrayStepShared):
                 self.sum_trees[odim] = self.sum_trees_noi[odim] + new
                 # To reduce memory usage, we trim the tree
                 self.all_trees[odim][tree_id] = new_tree.trim()
-
+    
                 if self.tune:
                     # Update the splitting variable and the splitting variable sampler
                     if self.iter > self.m:
                         self.ssv = SampleSplittingVariable(self.alpha_vec)
-
+    
                     for index in new_tree.get_split_variables():
                         self.alpha_vec[index] += 1
-
+    
                     # update standard deviation at leaf nodes
                     if self.iter > 2:
                         self.leaf_sd[odim] = self.running_sd[odim].update(new)
                     else:
                         self.running_sd[odim].update(new)
-
+    
                 else:
                     # update the variable inclusion
                     for index in new_tree.get_split_variables():
                         variable_inclusion[index] += 1
-
+    
         if not self.tune:
             self.bart.all_trees.append(self.all_trees)
-
+    
         variable_inclusion = _encode_vi(variable_inclusion)
-
+    
         stats = {"variable_inclusion": variable_inclusion, "tune": self.tune}
         return self.sum_trees, [stats]
-
+        
     def normalize(self, particles: list[ParticleTree]) -> float:
         """
         Use softmax to get normalized_weights.
@@ -668,6 +671,8 @@ def grow_tree(
     response,
     normal,
     shape,
+    Y=None,  # Добавляем Y как аргумент
+    all_trees_sum=None,  # Добавляем сумму всех деревьев
 ):
     current_node = tree.get_node(index_leaf_node)
     idx_data_points = current_node.idx_data_points
@@ -680,16 +685,19 @@ def grow_tree(
 
     split_rule = tree.split_rules[selected_predictor]
     
-    # TARGET ENCODING
-    if isinstance(split_rule, TargetEncodingSplitRule):
+    # TARGET ENCODING - передаем необходимые аргументы
+    if hasattr(split_rule, '__class__') and split_rule.__class__.__name__ == 'TargetEncodingSplitRule':
+        # Вычисляем остатки для target encoding
+        residuals = Y[idx_data_points] - all_trees_sum[idx_data_points] if all_trees_sum is not None else Y[idx_data_points]
+        
         split_value = split_rule.get_split_value(
             available_splitting_values,
-            targets=Y[idx_data_points],        # <--- ВАЖНО: реальные цели
-            residuals=sum_trees[:, idx_data_points].sum(axis=0)
+            targets=Y[idx_data_points],
+            residuals=residuals
         )
     
     # COUNTER ENCODING
-    elif isinstance(split_rule, CounterEncodingSplitRule):
+    elif hasattr(split_rule, '__class__') and split_rule.__class__.__name__ == 'CounterEncodingSplitRule':
         split_value = split_rule.get_split_value(
             available_splitting_values,
             training_categories=X[:, selected_predictor]
