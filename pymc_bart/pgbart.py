@@ -28,7 +28,7 @@ from pytensor import function as pytensor_function
 from pytensor.tensor.variable import Variable
 
 from pymc_bart.bart import BARTRV
-from pymc_bart.split_rules import ContinuousSplitRule
+from pymc_bart.split_rules import ContinuousSplitRule, TargetSplitRule, CounterSplitRule
 from pymc_bart.tree import (
     Node,
     Tree,
@@ -67,6 +67,8 @@ class ParticleTree:
         response,
         normal,
         shape,
+        Y=None,
+        all_trees_sum=None,
     ) -> bool:
         tree_grew = False
         if self.expansion_nodes:
@@ -88,6 +90,8 @@ class ParticleTree:
                     response,
                     normal,
                     shape,
+                    Y=Y,
+                    all_trees_sum=all_trees_sum,
                 )
                 if idx_new_nodes is not None:
                     self.expansion_nodes.extend(idx_new_nodes)
@@ -520,6 +524,8 @@ def grow_tree(
     response,
     normal,
     shape,
+    Y=None,
+    all_trees_sum=None,
 ):
     current_node = tree.get_node(index_leaf_node)
     idx_data_points = current_node.idx_data_points
@@ -532,7 +538,22 @@ def grow_tree(
 
     split_rule = tree.split_rules[selected_predictor]
 
-    split_value = split_rule.get_split_value(available_splitting_values)
+    # Support for TargetSplitRule and CounterSplitRule
+    if isinstance(split_rule, TargetSplitRule):
+        residuals = Y[idx_data_points] - all_trees_sum[idx_data_points] if all_trees_sum is not None else Y[idx_data_points]
+        split_value = split_rule.get_split_value(
+            available_splitting_values,
+            targets=Y[idx_data_points],
+            residuals=residuals
+        )
+    elif isinstance(split_rule, CounterSplitRule):
+        split_value = split_rule.get_split_value(
+            available_splitting_values,
+            training_categories=X[:, selected_predictor]
+        )
+    else:
+        # Default split rules (ContinuousSplitRule, OneHotSplitRule, SubsetSplitRule)
+        split_value = split_rule.get_split_value(available_splitting_values)
 
     if split_value is None:
         return None
