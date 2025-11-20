@@ -92,7 +92,11 @@ def predict_bart(idata, bart_var_name, X_new, model):
     samples = ppc[bart_var_name]
     return samples
 
-class BART(Distribution):
+class BART(pm.Distribution):
+    def __init__(self, name, X, Y, m=50, split_rule="default", **kwargs):
+        self.split_rule = split_rule
+        super().__init__(name, **kwargs)
+
     r"""
     Bayesian Additive Regression Tree distribution.
 
