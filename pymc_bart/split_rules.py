@@ -107,21 +107,27 @@ class SubsetSplitRule(SplitRule):
 
 class TargetSplitRule(SplitRule):
     """
-    Target encoding for categorical variables (CatBoost-style).
+    Target encoding for categorical variables (CatBoost-style: BinarizedTargetMeanValue).
     
     Transforms categorical feature values to numerical using target statistics
-    with Bayesian smoothing. Formula:
+    with Bayesian smoothing. 
     
+    Formula for Regression:
     avg_target = (countInClass + prior) / (totalCount + 1)
     
     where:
-    - countInClass: sum of target values for current categorical feature value
-    - prior: smoothing parameter
-    - totalCount: count of objects with current feature value
+    - countInClass: sum of all target values for current categorical feature value
+    - prior: smoothing parameter (default 1.0 in CatBoost)
+    - totalCount: count of objects WITH current feature value
+    
+    Example:
+    If category A appears 3 times with targets [0.1, 0.2, 0.3]:
+    avg_target_A = (0.1 + 0.2 + 0.3 + 1.0) / (3 + 1) = 1.6 / 4 = 0.4
     
     References:
     -----------
     CatBoost: Transforming categorical features to numerical features
+    Type: BinarizedTargetMeanValue
     https://catboost.ai/docs/concepts/algorithm-main-principles_cat-to-num
     """
     
@@ -130,9 +136,10 @@ class TargetSplitRule(SplitRule):
         Parameters
         ----------
         prior : float
-            Smoothing parameter for target encoding (default: 1.0)
+            Smoothing parameter (default: 1.0 per CatBoost for regression).
+            Prevents overfitting on small categories.
         n_buckets : int
-            Number of buckets for bucketing mode (default: 10)
+            Number of buckets for quantization (not used in current BART integration)
         """
         self.prior = prior
         self.n_buckets = n_buckets
@@ -142,16 +149,17 @@ class TargetSplitRule(SplitRule):
     def compute_target_encoding(self, categories: np.ndarray, targets: np.ndarray,
                                 residuals: Optional[np.ndarray] = None) -> dict:
         """
-        Compute target encoding for categorical values with smoothing.
+        Compute target encoding for categorical values using CatBoost formula.
         
         Parameters
         ----------
         categories : np.ndarray
-            Categorical values
+            Categorical values (e.g., [0, 0, 1, 1, 2, 2])
         targets : np.ndarray  
-            Target values (y)
+            Target values (e.g., [0.1, 0.2, 0.5, 0.6, 0.9, 1.0])
         residuals : Optional[np.ndarray]
-            Residuals from current tree sum (for iterative fitting)
+            Residuals from current tree sum (for iterative BART fitting).
+            If provided, used instead of targets.
             
         Returns
         -------
@@ -169,10 +177,10 @@ class TargetSplitRule(SplitRule):
             mask = categories == cat
             total_count = np.sum(mask)
             
-            # Sum of target values for this category
+            # SUM of target values for this category (not mean!)
             count_in_class = np.sum(encoding_targets[mask])
             
-            # Apply smoothing formula: (countInClass + prior) / (totalCount + 1)
+            # CatBoost formula: (sum_of_targets + prior) / (count + 1)
             encoded_value = (count_in_class + self.prior) / (total_count + 1)
             encoding_map[cat] = encoded_value
             
@@ -189,9 +197,9 @@ class TargetSplitRule(SplitRule):
         available_splitting_values : np.ndarray
             Categorical values for current split
         targets : Optional[np.ndarray]
-            Target values
+            Target values (for encoding computation)
         residuals : Optional[np.ndarray]  
-            Residuals for encoding
+            Residuals for encoding (takes precedence over targets)
             
         Returns
         -------
@@ -199,7 +207,7 @@ class TargetSplitRule(SplitRule):
             Split threshold on encoded values, or None if no split possible
         """
         if targets is None and residuals is None:
-            raise ValueError("Either targets or residuals must be provided for target encoding")
+            raise ValueError("Either targets or residuals must be provided for TargetSplitRule")
             
         if available_splitting_values.size <= 1:
             return None
@@ -215,7 +223,7 @@ class TargetSplitRule(SplitRule):
         numerical_values = np.array([self.encoding_map[x] for x in available_splitting_values])
         unique_values = np.unique(numerical_values)
         
-        # Use continuous split on encoded values
+        # Pick random split threshold from unique encoded values
         if len(unique_values) > 1:
             idx = int(np.random.random() * len(unique_values))
             return unique_values[idx]
@@ -229,14 +237,14 @@ class TargetSplitRule(SplitRule):
         Parameters
         ----------
         available_splitting_values : np.ndarray
-            Categorical values
+            Original categorical values
         split_value : float
-            Threshold on encoded values
+            Threshold on encoded values (from get_split_value)
             
         Returns
         -------
         np.ndarray
-            Boolean array indicating left branch (encoded value <= split_value)
+            Boolean array indicating left branch (encoded_value <= split_value)
         """
         if not self.encoding_map:
             raise ValueError("Encoding map not computed. Call get_split_value first.")
@@ -247,21 +255,28 @@ class TargetSplitRule(SplitRule):
 
 class CounterSplitRule(SplitRule):
     """
-    Counter encoding for categorical variables (CatBoost-style).
+    Counter encoding for categorical variables (CatBoost-style: Counter method).
     
-    Frequency-based encoding that doesn't depend on target values.
-    Formula:
+    Frequency-based encoding that depends ONLY on feature value frequencies,
+    NOT on target values. Useful when target dependency is not desired.
     
+    Formula (Training dataset):
     ctr = (curCount + prior) / (maxCount + 1)
     
     where:
-    - curCount: frequency of current categorical value
-    - maxCount: maximum frequency across all categories
-    - prior: smoothing parameter
+    - curCount: frequency of current categorical value in training set
+    - maxCount: maximum frequency among all categorical values in training set
+    - prior: smoothing parameter (default 1.0)
+    
+    Example:
+    If training set has categories with frequencies: A=50, B=30, C=20
+    maxCount = 50
+    Encodings: A = (50+1)/(50+1) = 1.0, B = (30+1)/(50+1) = 0.61, C = (20+1)/(50+1) = 0.41
     
     References:
     -----------
     CatBoost: Counter transformation method
+    Type: Counter
     https://catboost.ai/docs/concepts/algorithm-main-principles_cat-to-num
     """
     
@@ -272,56 +287,63 @@ class CounterSplitRule(SplitRule):
         prior : float
             Smoothing parameter (default: 1.0)
         calculation_method : str
-            'Full' - use all training + test data for encoding
-            'SkipTest' - use only training data
+            'Full' - use all training + validation data for maxCount and frequencies
+            'SkipTest' - use only training data (more conservative)
         """
         self.prior = prior
         self.calculation_method = calculation_method
         self.encoding_map = {}
         self.max_count = 0
+        self.training_freqs = {}  # Store frequencies for consistency
         
     def compute_counter_encoding(self, categories: np.ndarray,
                                 training_categories: Optional[np.ndarray] = None) -> dict:
         """
-        Compute counter encoding based on frequencies.
+        Compute counter encoding based on CatBoost Counter method.
+        
+        Formula: ctr = (curCount + prior) / (maxCount + 1)
         
         Parameters
         ----------
         categories : np.ndarray
-            Current categorical values
+            Current categorical values (e.g., from a tree node)
         training_categories : Optional[np.ndarray]
-            Full training set categories for consistent encoding
+            Full training set categories for reference counts.
+            If None, uses current categories as reference.
             
         Returns
         -------
         dict
             Mapping from category to counter encoded value
         """
+        # Determine reference distribution for maxCount
         if training_categories is not None:
-            # Use full training set for consistent encoding
-            all_cats = training_categories
+            reference_cats = training_categories
         else:
-            all_cats = categories
+            reference_cats = categories
             
-        unique_cats, counts = np.unique(all_cats, return_counts=True)
-        self.max_count = np.max(counts)
+        # Get unique values and their frequencies in reference set
+        unique_cats, counts = np.unique(reference_cats, return_counts=True)
+        max_count = np.max(counts)
+        self.max_count = max_count
+        
+        # Store training frequencies for consistency
+        self.training_freqs = dict(zip(unique_cats, counts))
         
         encoding_map = {}
         
-        # Count occurrences in current set
-        unique_current, counts_current = np.unique(categories, return_counts=True)
-        current_counts = dict(zip(unique_current, counts_current))
-        
-        for cat in unique_cats:
-            if self.calculation_method == "Full":
-                # Use total count from training set + current count
-                total_cat_count = counts[unique_cats == cat][0] if cat in unique_cats else 0
-            else:  # SkipTest
-                # Use only current count (from current node)
-                total_cat_count = current_counts.get(cat, 0)
+        # For each category in current data
+        unique_current = np.unique(categories)
+        for cat in unique_current:
+            # Get frequency from training/reference set if available
+            if cat in self.training_freqs:
+                cat_count = self.training_freqs[cat]
+            else:
+                # If category doesn't exist in training, use current count
+                cat_count = np.sum(categories == cat)
                 
-            # Apply formula: (curCount + prior) / (maxCount + 1)
-            encoded_value = (total_cat_count + self.prior) / (self.max_count + 1)
+            # CatBoost Counter formula: (count + prior) / (maxCount + 1)
+            encoded_value = (cat_count + self.prior) / (max_count + 1)
             encoding_map[cat] = encoded_value
             
         return encoding_map
@@ -336,7 +358,7 @@ class CounterSplitRule(SplitRule):
         available_splitting_values : np.ndarray
             Categorical values for current split
         training_categories : Optional[np.ndarray]
-            Full training set categories for consistent encoding
+            Full training set categories (for computing maxCount)
             
         Returns
         -------
@@ -354,6 +376,7 @@ class CounterSplitRule(SplitRule):
         numerical_values = np.array([self.encoding_map[x] for x in available_splitting_values])
         unique_values = np.unique(numerical_values)
         
+        # Pick random split threshold from unique encoded values
         if len(unique_values) > 1:
             idx = int(np.random.random() * len(unique_values))
             return unique_values[idx]
@@ -367,14 +390,14 @@ class CounterSplitRule(SplitRule):
         Parameters
         ----------
         available_splitting_values : np.ndarray
-            Categorical values
+            Original categorical values
         split_value : float
-            Threshold on encoded values
+            Threshold on encoded values (from get_split_value)
             
         Returns
         -------
         np.ndarray
-            Boolean array indicating left branch (encoded value <= split_value)
+            Boolean array indicating left branch (encoded_value <= split_value)
         """
         if not self.encoding_map:
             raise ValueError("Encoding map not computed. Call get_split_value first.")
