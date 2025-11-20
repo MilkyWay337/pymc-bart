@@ -71,30 +71,9 @@ class BARTRV(RandomVariable):
 
 
 bart = BARTRV()
-import numpy as np
-import pymc as pm
 
-def predict_bart(idata, bart_var_name, X_new, model):
-    """
-    Предсказывает значения BART для новых точек X_new.
-    idata: InferenceData после pm.sample()
-    bart_var_name: имя BART-переменной в модели (string)
-    X_new: numpy array или подходящая структура для X
-    model: pm.Model, в котором был создан BART
-
-    Использует MutableData и sample_posterior_predictive под капотом.
-    """
-    # Предположим, что при построении модели вы назвали X как MutableData("X_shared", ...)
-    # Нужно узнать, как называется этот shared
-    # Допустим, "X_shared"
-    pm.set_data({ "X_shared": X_new }, model=model)
-    ppc = pm.sample_posterior_predictive(idata, model=model, var_names=[bart_var_name])
-    samples = ppc[bart_var_name]
-    return samples
 
 class BART(Distribution):
-    
-
     r"""
     Bayesian Additive Regression Tree distribution.
 
@@ -123,12 +102,7 @@ class BART(Distribution):
     split_rules : Optional[list[SplitRule]], default None
         List of SplitRule objects, one per column in input data.
         Allows using different split rules for different columns. Default is ContinuousSplitRule.
-        Other options are OneHotSplitRule, SubsetSplitRule, TargetEncodingSplitRule, and CounterEncodingSplitRule.
-        TargetEncodingSplitRule and CounterEncodingSplitRule allow advanced encoding for categorical variables.
-        Пример использования:
-        >>> from pymc_bart.split_rules import CounterEncodingSplitRule, TargetEncodingSplitRule
-        >>> split_rules = [CounterEncodingSplitRule(), TargetEncodingSplitRule()]
-        >>> bart = BART('bart', X, y, split_rules=split_rules)
+        Other options are OneHotSplitRule and SubsetSplitRule, both meant for categorical variables.
     separate_trees : Optional[bool], default False
         When training multiple trees (by setting a shape parameter), the default behavior is to
         learn a joint tree structure and only have different leaf values for each.
