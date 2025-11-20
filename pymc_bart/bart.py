@@ -169,9 +169,10 @@ class BART(Distribution):
             },
         )()
 
-        Distribution.register(BARTRV)
+        # Register the specific generated RandomVariable subclass with PyMC
+        Distribution.register(bart_op.__class__)
 
-        @_support_point.register(BARTRV)
+        @_support_point.register(bart_op.__class__)
         def get_moment(rv, size, *rv_inputs):
             return cls.get_moment(rv, size, *rv_inputs)
 
