@@ -96,7 +96,7 @@ class Tree:
     ----------
     tree_structure : dict[int, Node]
         A dictionary that represents the nodes stored in breadth-first order, based in the array
-        method for storing binary trees[](https://en.wikipedia.org/wiki/Binary_tree#Arrays).
+        method for storing binary trees (https://en.wikipedia.org/wiki/Binary_tree#Arrays).
         The dictionary's keys are integers that represent the nodes position.
         The dictionary's values are objects of type Node that represent the split and leaf nodes
         of the tree itself.
