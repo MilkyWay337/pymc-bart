@@ -1,177 +1,238 @@
-import jax.numpy as jnp
+#   Copyright 2022 The PyMC Developers
+#
+#   Licensed under the Apache License, Version 2.0 (the "License");
+#   you may not use this file except in compliance with the License.
+#   You may obtain a copy of the License at
+#
+#       http://www.apache.org/licenses/LICENSE-2.0
+#
+#   Unless required by applicable law or agreed to in writing, software
+#   distributed under the License is distributed on an "AS IS" BASIS,
+#   WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+#   See the License for the specific language governing permissions and
+#   limitations under the License.
+
+from abc import abstractmethod
+
 import numpy as np
-from typing import Dict, List, Optional, Tuple, Any
-from functools import partial
+from numba import njit
 
 
-def continuous_split_rule(X, y, feature, min_samples_leaf=1, **kwargs):
+class SplitRule:
     """
-    Original continuous split rule
+    Abstract template class for a split rule
     """
-    feature_values = X[:, feature]
-    sorted_indices = jnp.argsort(feature_values)
-    sorted_features = feature_values[sorted_indices]
-    sorted_y = y[sorted_indices]
-    
-    n = len(sorted_features)
-    best_gain = -jnp.inf
-    best_split_value = None
-    
-    for i in range(min_samples_leaf, n - min_samples_leaf):
-        if sorted_features[i] == sorted_features[i + 1]:
-            continue
+
+    @staticmethod
+    @abstractmethod
+    def get_split_value(available_splitting_values):
+        pass
+
+    @staticmethod
+    @abstractmethod
+    def divide(available_splitting_values, split_value):
+        pass
+
+
+class ContinuousSplitRule(SplitRule):
+    """
+    Standard continuous split rule: pick a pivot value and split
+    depending on if variable is smaller or greater than the value picked.
+    """
+
+    @staticmethod
+    def get_split_value(available_splitting_values):
+        split_value = None
+        if available_splitting_values.size > 1:
+            idx_selected_splitting_values = int(
+                np.random.random() * len(available_splitting_values)
+            )
+            split_value = available_splitting_values[idx_selected_splitting_values]
+        return split_value
+
+    @staticmethod
+    @njit
+    def divide(available_splitting_values, split_value):
+        return available_splitting_values <= split_value
+
+
+class OneHotSplitRule(SplitRule):
+    """Choose a single categorical value and branch on if the variable is that value or not"""
+
+    @staticmethod
+    def get_split_value(available_splitting_values):
+        split_value = None
+        if available_splitting_values.size > 1 and not np.all(
+            available_splitting_values == available_splitting_values[0]
+        ):
+            idx_selected_splitting_values = int(
+                np.random.random() * len(available_splitting_values)
+            )
+            split_value = available_splitting_values[idx_selected_splitting_values]
+        return split_value
+
+    @staticmethod
+    @njit
+    def divide(available_splitting_values, split_value):
+        return available_splitting_values == split_value
+
+
+class SubsetSplitRule(SplitRule):
+    """
+    Choose a random subset of the categorical values and branch on belonging to that set.
+    This is the approach taken by Sameer K. Deshpande.
+    flexBART: Flexible Bayesian regression trees with categorical predictors. arXiv,
+    `link <https://arxiv.org/abs/2211.04459>`__
+    """
+
+    @staticmethod
+    def get_split_value(available_splitting_values):
+        split_value = None
+        if available_splitting_values.size > 1 and not np.all(
+            available_splitting_values == available_splitting_values[0]
+        ):
+            unique_values = np.unique(available_splitting_values)
+            while True:
+                sample = np.random.randint(0, 2, size=len(unique_values)).astype(bool)
+                if np.any(sample):
+                    break
+            split_value = unique_values[sample]
+        return split_value
+
+    @staticmethod
+    def divide(available_splitting_values, split_value):
+        return np.isin(available_splitting_values, split_value)
+# pymc_bart/split_rules.py
+
+from abc import abstractmethod
+import numpy as np
+from numba import njit
+
+class TargetSplitRule(SplitRule):
+    """
+    Target-based split rule for categorical features inspired by CatBoost.
+    Transforms categorical features into numerical values based on target statistics.
+    """
+
+    @staticmethod
+    def get_split_value(available_splitting_values, y=None, node_indices=None, alpha=1.0):
+        """
+        Calculate target statistics and pick a split value.
+        
+        Parameters
+        ----------
+        available_splitting_values : np.ndarray
+            Categorical feature values for current node
+        y : np.ndarray, optional
+            Target values for all observations
+        node_indices : np.ndarray, optional  
+            Indices of observations in current node
+        alpha : float
+            Smoothing parameter for target statistics
             
-        left_y = sorted_y[:i + 1]
-        right_y = sorted_y[i + 1:]
-        
-        var_left = jnp.var(left_y) if len(left_y) > 1 else 0.0
-        var_right = jnp.var(right_y) if len(right_y) > 1 else 0.0
-        var_total = jnp.var(sorted_y)
-        
-        n_left, n_right = len(left_y), len(right_y)
-        weighted_var = (n_left * var_left + n_right * var_right) / n
-        
-        gain = var_total - weighted_var
-        
-        if gain > best_gain:
-            best_gain = gain
-            best_split_value = (sorted_features[i] + sorted_features[i + 1]) / 2
-    
-    if best_split_value is not None:
-        return best_split_value, best_gain
-    return None
-
-
-def target_split_rule(X, y, feature, min_samples_leaf=1, alpha=1.0, **kwargs):
-    """
-    Split rule for categorical features based on target statistics.
-    
-    Args:
-        X: Input data
-        y: Target values
-        feature: Feature index to split on
-        min_samples_leaf: Minimum samples per leaf
-        alpha: Smoothing parameter for target statistics
-    
-    Returns:
-        Tuple (split_value, gain) or None if no good split found
-    """
-    feature_values = X[:, feature]
-    unique_vals = jnp.unique(feature_values)
-    
-    # Skip if not enough unique values or samples
-    if len(unique_vals) <= 1 or len(y) < 2 * min_samples_leaf:
-        return None
-    
-    # Calculate target statistics for each category
-    category_stats = _calculate_category_stats(feature_values, y, unique_vals, alpha)
-    
-    if len(category_stats) < 2:
-        return None
-        
-    # Order categories by target mean
-    ordered_categories = _order_categories_by_target(category_stats)
-    
-    # Find best binary split
-    best_split = _find_best_binary_split(feature_values, y, ordered_categories, 
-                                       category_stats, min_samples_leaf)
-    
-    return best_split
-
-
-def _calculate_category_stats(feature_values, y, unique_vals, alpha):
-    """Calculate target statistics for each category with smoothing."""
-    stats = {}
-    global_mean = jnp.mean(y)
-    
-    for category in unique_vals:
-        mask = feature_values == category
-        n_category = jnp.sum(mask)
-        
-        if n_category == 0:
-            continue
+        Returns
+        -------
+        split_value : float or None
+            The split threshold for transformed values
+        """
+        if available_splitting_values.size <= 1:
+            return None
             
-        category_mean = jnp.mean(y[mask])
+        if y is None or node_indices is None:
+            # Fall back to random selection if target info not available
+            idx = int(np.random.random() * len(available_splitting_values))
+            return available_splitting_values[idx]
         
-        # Apply smoothing (like in CatBoost)
-        smoothed_mean = (n_category * category_mean + alpha * global_mean) / (n_category + alpha)
+        # Get data for current node
+        x_node = available_splitting_values
+        y_node = y[node_indices]
         
-        stats[category.item()] = {
-            'mean': smoothed_mean,
-            'n': n_category,
-            'raw_mean': category_mean
-        }
+        # Calculate target statistics for each unique category
+        unique_cats = np.unique(x_node)
+        if len(unique_cats) < 2:
+            return None
+            
+        # Transform categorical values to target statistics
+        transformed_values = np.zeros(len(x_node), dtype=float)
+        global_mean = np.mean(y_node)
         
-    return stats
+        for cat in unique_cats:
+            cat_mask = (x_node == cat)
+            cat_count = np.sum(cat_mask)
+            
+            if cat_count > 0:
+                cat_target_mean = np.mean(y_node[cat_mask])
+                # Apply smoothing (CatBoost style)
+                smoothed_value = (cat_count * cat_target_mean + alpha * global_mean) / (cat_count + alpha)
+                transformed_values[cat_mask] = smoothed_value
+        
+        # Now use continuous split logic on transformed values
+        if len(np.unique(transformed_values)) < 2:
+            return None
+            
+        # Pick a random split value from unique transformed values
+        unique_transformed = np.unique(transformed_values)
+        if len(unique_transformed) > 1:
+            # Avoid endpoints to ensure proper split
+            idx = int(np.random.random() * (len(unique_transformed) - 1))
+            split_value = (unique_transformed[idx] + unique_transformed[idx + 1]) / 2.0
+            return split_value
+            
+        return None
 
-
-def _order_categories_by_target(category_stats):
-    """Order categories by their target mean."""
-    categories = list(category_stats.keys())
-    means = jnp.array([category_stats[cat]['mean'] for cat in categories])
-    
-    # Sort categories by mean
-    sorted_indices = jnp.argsort(means)
-    return [categories[i] for i in sorted_indices]
-
-
-def _find_best_binary_split(feature_values, y, ordered_categories, 
-                          category_stats, min_samples_leaf):
-    """Find best binary split among ordered categories."""
-    n_categories = len(ordered_categories)
-    best_gain = -jnp.inf
-    best_split_value = None
-    
-    for split_idx in range(1, n_categories):
-        left_categories = ordered_categories[:split_idx]
-        right_categories = ordered_categories[split_idx:]
+    @staticmethod
+    @njit
+    def divide(available_splitting_values, split_value, y=None, node_indices=None, alpha=1.0):
+        """
+        Split based on target-transformed values.
         
-        left_mask = jnp.zeros_like(feature_values, dtype=bool)
-        right_mask = jnp.zeros_like(feature_values, dtype=bool)
+        Parameters
+        ----------
+        available_splitting_values : np.ndarray
+            Categorical feature values
+        split_value : float
+            Threshold for transformed values
+        y : np.ndarray, optional
+            Target values  
+        node_indices : np.ndarray, optional
+            Indices of observations in node
+        alpha : float
+            Smoothing parameter
+            
+        Returns
+        -------
+        mask : np.ndarray
+            Boolean mask for left/right split
+        """
+        if y is None or node_indices is None:
+            # Fallback: use random split
+            return available_splitting_values == available_splitting_values[0]
         
-        for cat in left_categories:
-            left_mask = left_mask | (feature_values == cat)
-        for cat in right_categories:
-            right_mask = right_mask | (feature_values == cat)
+        # Transform categorical values using same logic as get_split_value
+        x_node = available_splitting_values
+        y_node = y[node_indices]
+        unique_cats = np.unique(x_node)
+        transformed_values = np.zeros(len(x_node), dtype=np.float64)
+        global_mean = np.mean(y_node)
         
-        # Check minimum samples constraint
-        n_left = jnp.sum(left_mask)
-        n_right = jnp.sum(right_mask)
+        for cat in unique_cats:
+            cat_mask = x_node == cat
+            cat_count = np.sum(cat_mask)
+            
+            if cat_count > 0:
+                # Calculate mean for this category
+                cat_sum = 0.0
+                count = 0
+                for i in range(len(x_node)):
+                    if x_node[i] == cat:
+                        cat_sum += y_node[i]
+                        count += 1
+                if count > 0:
+                    cat_target_mean = cat_sum / count
+                    smoothed_value = (count * cat_target_mean + alpha * global_mean) / (count + alpha)
+                    for i in range(len(x_node)):
+                        if x_node[i] == cat:
+                            transformed_values[i] = smoothed_value
         
-        if n_left < min_samples_leaf or n_right < min_samples_leaf:
-            continue
-        
-        gain = _calculate_variance_reduction(y, left_mask, right_mask)
-        
-        if gain > best_gain and gain > 0:
-            best_gain = gain
-            # Use the mean between the last left and first right category
-            last_left = category_stats[ordered_categories[split_idx-1]]['mean']
-            first_right = category_stats[ordered_categories[split_idx]]['mean']
-            best_split_value = (last_left + first_right) / 2.0
-    
-    if best_split_value is not None:
-        return best_split_value, best_gain
-    return None
-
-
-def _calculate_variance_reduction(y, left_mask, right_mask):
-    """Calculate variance reduction for a split."""
-    y_left = y[left_mask]
-    y_right = y[right_mask]
-    
-    if len(y_left) == 0 or len(y_right) == 0:
-        return -jnp.inf
-    
-    n_left, n_right, n_all = len(y_left), len(y_right), len(y)
-    
-    # Calculate variances
-    var_left = jnp.var(y_left) if len(y_left) > 1 else 0.0
-    var_right = jnp.var(y_right) if len(y_right) > 1 else 0.0
-    var_all = jnp.var(y)
-    
-    # Weighted variance after split
-    weighted_var = (n_left * var_left + n_right * var_right) / n_all
-    
-    # Variance reduction
-    return var_all - weighted_var
+        # Split based on transformed values
+        return transformed_values <= split_value
