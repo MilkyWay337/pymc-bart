@@ -16,8 +16,8 @@ from pytensor.tensor.variable import Variable
 
 from pymc_bart.bart import BARTRV
 from pymc_bart.decision_table import DecisionTable, DecisionTableNode
-from pymc_bart.split_rules import ContinuousSplitRule, SplitRule
-from pymc_bart.utils import _encode_vi
+from pymc_bart.split_rules import ContinuousSplitRule, SplitRule, TargetSplitRule
+from pymc_bart.utils import _encode_vi, compute_target_statistics_node, detect_categorical_features
 
 
 class MHDecisionTableMove:
@@ -68,7 +68,7 @@ class GrowMove(MHDecisionTableMove):
         rng: np.random.Generator,
         context: dict | None = None,
     ) -> tuple[DecisionTable, float, dict | None]:
-        """Propose growing a random leaf node."""
+        """Propose growing a random leaf node with TargetSplit support."""
         new_table = table.copy()
         leaf_nodes = new_table.get_leaf_nodes(with_depth=True)
 
@@ -88,6 +88,11 @@ class GrowMove(MHDecisionTableMove):
         split_var, split_value = new_table.get_level_predicate(depth)
         if split_var is None or split_value is None:
             split_var = rng.integers(0, X.shape[1])
+            
+            # Get data for current node
+            X_node = X[node_mask]
+            Y_node = Y[node_mask]
+            
             feature_splits = context.get("feature_splits") if context else None
             available_splits = _get_cached_split_candidates(
                 X,
@@ -95,21 +100,60 @@ class GrowMove(MHDecisionTableMove):
                 node_mask,
                 feature_splits[split_var] if feature_splits else None,
             )
+            
             if available_splits.size == 0:
                 return new_table, -np.inf, None
 
-            split_value_raw = table.split_rules[split_var].get_split_value(available_splits)
+            # Apply TargetSplit transformation for categorical features
+            if (context and context.get("use_target_split", False) and 
+                split_var in context.get("categorical_features", [])):
+                
+                # Transform categorical values using target statistics
+                transformed_values = compute_target_statistics_node(
+                    available_splits, 
+                    Y_node,
+                    alpha=context.get("target_split_alpha", 1.0)
+                )
+                
+                # Use continuous split on transformed values
+                split_value_raw = ContinuousSplitRule.get_split_value(transformed_values)
+            else:
+                # Use original split rule
+                split_rule = table.split_rules[split_var]
+                split_value_raw = split_rule.get_split_value(available_splits)
+            
             if split_value_raw is None:
                 return new_table, -np.inf, None
             split_value = _ensure_split_array(split_value_raw)
         else:
             split_value = split_value.copy()
 
-        split_rule = table.split_rules[split_var]
-        division = _split_decision(split_rule, X[:, split_var], split_value)
-
-        left_mask = node_mask & division
-        right_mask = node_mask & (~division)
+        # Apply appropriate split decision based on feature type
+        if (context and context.get("use_target_split", False) and 
+            split_var in context.get("categorical_features", [])):
+            
+            # Transform the entire feature column for this node
+            X_feature_node = X[node_mask, split_var]
+            Y_node = Y[node_mask]
+            transformed_values = compute_target_statistics_node(
+                X_feature_node, 
+                Y_node,
+                alpha=context.get("target_split_alpha", 1.0)
+            )
+            
+            # Use continuous split on transformed values
+            division = ContinuousSplitRule.divide(transformed_values, split_value)
+        else:
+            # Use original split rule
+            split_rule = table.split_rules[split_var]
+            division = split_rule.divide(X[:, split_var], split_value)
+        
+        # Apply mask to get division for current node only
+        division_full = np.zeros(len(X), dtype=bool)
+        division_full[node_mask] = division
+        
+        left_mask = node_mask & division_full
+        right_mask = node_mask & (~division_full)
 
         if not left_mask.any() or not right_mask.any():
             return new_table, -np.inf, None
@@ -194,9 +238,27 @@ class PruneMove(MHDecisionTableMove):
         if left_child is None or right_child is None:
             return new_table, -np.inf, None
 
-        division = _split_decision(
-            table.split_rules[split_var], X[:, split_var], split_value
-        )
+        # Apply appropriate split decision based on feature type
+        if (context and context.get("use_target_split", False) and 
+            split_var in context.get("categorical_features", [])):
+            
+            # Transform the entire feature column for this node
+            X_feature_node = X[node_mask, split_var]
+            Y_node = Y[node_mask]
+            transformed_values = compute_target_statistics_node(
+                X_feature_node, 
+                Y_node,
+                alpha=context.get("target_split_alpha", 1.0)
+            )
+            
+            # Use continuous split on transformed values
+            division = ContinuousSplitRule.divide(transformed_values, split_value)
+        else:
+            # Use original split rule
+            division = _split_decision(
+                table.split_rules[split_var], X[:, split_var], split_value
+            )
+            
         left_mask = node_mask & division
         right_mask = node_mask & (~division)
 
@@ -281,14 +343,51 @@ class ChangeMove(MHDecisionTableMove):
         if available_splits.size == 0:
             return new_table, -np.inf, None
 
-        # Select split value
-        split_value_raw = table.split_rules[new_split_var].get_split_value(available_splits)
+        # Apply TargetSplit transformation for categorical features
+        if (context and context.get("use_target_split", False) and 
+            new_split_var in context.get("categorical_features", [])):
+            
+            # Get data for current node
+            X_node = X[node_mask]
+            Y_node = Y[node_mask]
+            
+            # Transform categorical values using target statistics
+            transformed_values = compute_target_statistics_node(
+                available_splits, 
+                Y_node,
+                alpha=context.get("target_split_alpha", 1.0)
+            )
+            
+            # Use continuous split on transformed values
+            split_value_raw = ContinuousSplitRule.get_split_value(transformed_values)
+        else:
+            # Use original split rule
+            split_rule = table.split_rules[new_split_var]
+            split_value_raw = split_rule.get_split_value(available_splits)
+            
         if split_value_raw is None:
             return new_table, -np.inf, None
         split_value = _ensure_split_array(split_value_raw)
 
-        split_rule = table.split_rules[new_split_var]
-        division = _split_decision(split_rule, X[:, new_split_var], split_value)
+        # Apply appropriate split decision based on feature type
+        if (context and context.get("use_target_split", False) and 
+            new_split_var in context.get("categorical_features", [])):
+            
+            # Transform the entire feature column for this node
+            X_feature_node = X[node_mask, new_split_var]
+            Y_node = Y[node_mask]
+            transformed_values = compute_target_statistics_node(
+                X_feature_node, 
+                Y_node,
+                alpha=context.get("target_split_alpha", 1.0)
+            )
+            
+            # Use continuous split on transformed values
+            division = ContinuousSplitRule.divide(transformed_values, split_value)
+        else:
+            split_rule = table.split_rules[new_split_var]
+            division = split_rule.divide(X[:, new_split_var], split_value)
+            
         left_mask = node_mask & division
         right_mask = node_mask & (~division)
 
@@ -340,6 +439,12 @@ class MHDecisionTableSampler(ArrayStepShared):
         Optional model for sampling step. Defaults to None (taken from context).
     initial_point : Optional dict
         Initial point for sampling
+    use_target_split : bool
+        Whether to use TargetSplit for categorical features. Defaults to False.
+    categorical_features : Optional[list[int]]
+        List of indices of categorical features. If None, will be auto-detected.
+    target_split_alpha : float
+        Smoothing parameter for target statistics calculation. Defaults to 1.0.
     """
 
     name = "mh_decision_table"
@@ -363,6 +468,10 @@ class MHDecisionTableSampler(ArrayStepShared):
         rng_seed: int | None = None,
         model: Model | None = None,
         initial_point: dict | None = None,
+        # New parameters for TargetSplit
+        use_target_split: bool = False,
+        categorical_features: list[int] | None = None,
+        target_split_alpha: float = 1.0,
         **kwargs,
     ) -> None:
         model = modelcontext(model)
@@ -418,6 +527,27 @@ class MHDecisionTableSampler(ArrayStepShared):
             _get_available_splits(self.X, var_idx) for var_idx in range(self.num_variates)
         ]
 
+        # Target split configuration
+        self.use_target_split = use_target_split
+        self.target_split_alpha = target_split_alpha
+        self.categorical_features = categorical_features or []
+        
+        # Auto-detect categorical features if not specified
+        if self.use_target_split and not self.categorical_features:
+            self.categorical_features = detect_categorical_features(self.X)
+
+        # Initialize split rules - use TargetSplit for categorical features
+        if self.bart.split_rules:
+            self.split_rules = self.bart.split_rules
+        else:
+            self.split_rules = [ContinuousSplitRule] * self.num_variates
+        
+        # Override categorical features with TargetSplitRule
+        if self.use_target_split:
+            for feat_idx in self.categorical_features:
+                if feat_idx < len(self.split_rules):
+                    self.split_rules[feat_idx] = TargetSplitRule()
+
         # Normalize move probabilities
         move_probs = np.array(move_probs)
         if np.any(move_probs <= 0):
@@ -446,9 +576,7 @@ class MHDecisionTableSampler(ArrayStepShared):
                 leaf_node_value=np.array([self.Y.mean() / self.m]),
                 num_observations=self.num_observations,
                 shape=1,
-                split_rules=self.bart.split_rules
-                if self.bart.split_rules
-                else [ContinuousSplitRule] * self.num_variates,
+                split_rules=self.split_rules,
             )
             for _ in range(self.m)
         ]
@@ -530,15 +658,19 @@ class MHDecisionTableSampler(ArrayStepShared):
         current_prediction: npt.NDArray,
         rng_seed: int,
     ) -> dict:
-        """Execute a single MH proposal for one table (optionally in parallel)."""
+        """Execute a single MH proposal for one table with TargetSplit support."""
         rng = np.random.default_rng(rng_seed)
         move_idx = rng.choice(len(self.moves), p=self.move_probs)
         move = self.moves[move_idx]
         reverse_idx = self.reverse_move_idx[move_idx]
 
+        # Enhanced context with TargetSplit parameters
         context = {
             "feature_splits": self.feature_splits,
             "mask_cache": self.mask_cache[table_idx],
+            "use_target_split": self.use_target_split,
+            "categorical_features": self.categorical_features,
+            "target_split_alpha": self.target_split_alpha,
         }
 
         proposed_table, log_hastings, move_metadata = move.propose(
@@ -561,11 +693,14 @@ class MHDecisionTableSampler(ArrayStepShared):
                 "count_iteration": False,
             }
 
-        new_prediction = self._apply_prediction_update(
-            current_prediction, move_metadata
-        )
-        if new_prediction is None:
+        # For TargetSplit, we need to recalculate predictions
+        if self.use_target_split:
             new_prediction = proposed_table.predict(self.X)
+        else:
+            new_prediction = self._apply_prediction_update(current_prediction, move_metadata)
+            if new_prediction is None:
+                new_prediction = proposed_table.predict(self.X)
+
         log_likelihood_ratio = self._compute_log_likelihood_ratio(
             current_prediction, new_prediction
         )
