@@ -1316,3 +1316,141 @@ def _encode_vi(vec: list[int]) -> str:
             n >>= 7
         result.append(n & 0x7F)
     return base64.b64encode(bytes(result)).decode("ascii")
+
+
+# =============================================================================
+# TargetSplit Utilities
+# =============================================================================
+
+@jit(nopython=True)
+def compute_target_statistics_node(
+    x_categorical: np.ndarray, 
+    y: np.ndarray, 
+    alpha: float = 1.0
+) -> np.ndarray:
+    """
+    Compute target statistics for categorical values in a node.
+    
+    Parameters
+    ----------
+    x_categorical : np.ndarray
+        Categorical feature values in the node
+    y : np.ndarray  
+        Target values in the node
+    alpha : float
+        Smoothing parameter
+        
+    Returns
+    -------
+    np.ndarray
+        Transformed numerical values using target statistics
+    """
+    if len(x_categorical) == 0:
+        return np.zeros_like(x_categorical, dtype=np.float64)
+    
+    unique_cats = np.unique(x_categorical)
+    transformed = np.zeros(len(x_categorical), dtype=np.float64)
+    global_mean = np.mean(y)
+    
+    for cat in unique_cats:
+        mask = x_categorical == cat
+        cat_values = y[mask]
+        
+        if len(cat_values) > 0:
+            cat_mean = np.mean(cat_values)
+            cat_count = len(cat_values)
+            
+            # Apply smoothing (CatBoost style)
+            smoothed_value = (cat_count * cat_mean + alpha * global_mean) / (cat_count + alpha)
+            transformed[mask] = smoothed_value
+        else:
+            transformed[mask] = global_mean
+    
+    return transformed
+
+
+def detect_categorical_features(X: np.ndarray, max_categories: int = 20, 
+                              categorical_threshold: float = 0.1) -> list[int]:
+    """
+    Detect categorical features in dataset.
+    
+    Parameters
+    ----------
+    X : np.ndarray
+        Feature matrix
+    max_categories : int
+        Maximum number of unique values to consider as categorical
+    categorical_threshold : float
+        Maximum ratio of unique values to total samples to consider as categorical
+        
+    Returns
+    -------
+    list[int]
+        List of indices of categorical features
+    """
+    categorical_features = []
+    n_samples = X.shape[0]
+    
+    for i in range(X.shape[1]):
+        # Skip if all values are the same
+        if np.all(X[:, i] == X[0, i]):
+            continue
+            
+        unique_vals = len(np.unique(X[:, i]))
+        
+        # Check if feature has limited unique values (heuristic for categorical)
+        if (unique_vals <= max_categories and 
+            unique_vals <= categorical_threshold * n_samples):
+            categorical_features.append(i)
+    
+    return categorical_features
+
+
+def create_target_split_mappings(X: np.ndarray, Y: np.ndarray, 
+                               categorical_features: list[int],
+                               alpha: float = 1.0) -> dict[int, dict]:
+    """
+    Create target statistics mappings for categorical features.
+    
+    Parameters
+    ----------
+    X : np.ndarray
+        Feature matrix
+    Y : np.ndarray
+        Target values
+    categorical_features : list[int]
+        Indices of categorical features
+    alpha : float
+        Smoothing parameter
+        
+    Returns
+    -------
+    dict[int, dict]
+        Mapping from feature index to category->value mapping
+    """
+    mappings = {}
+    
+    for feat_idx in categorical_features:
+        feature_values = X[:, feat_idx]
+        unique_cats = np.unique(feature_values)
+        mapping = {}
+        
+        global_mean = np.mean(Y)
+        
+        for cat in unique_cats:
+            mask = feature_values == cat
+            cat_values = Y[mask]
+            
+            if len(cat_values) > 0:
+                cat_mean = np.mean(cat_values)
+                cat_count = len(cat_values)
+                
+                # Apply smoothing
+                smoothed_value = (cat_count * cat_mean + alpha * global_mean) / (cat_count + alpha)
+                mapping[cat] = smoothed_value
+            else:
+                mapping[cat] = global_mean
+        
+        mappings[feat_idx] = mapping
+    
+    return mappings
