@@ -1,238 +1,298 @@
-import jax
-import jax.numpy as jnp
+# pylint: disable=unused-argument
+# pylint: disable=arguments-differ
+#   Copyright 2022 The PyMC Developers
+#
+#   Licensed under the Apache License, Version 2.0 (the "License");
+#   you may not use this file except in compliance with the License.
+#   You may obtain a copy of the License at
+#
+#       http://www.apache.org/licenses/LICENSE-2.0
+#
+#   Unless required by applicable law or agreed to in writing, software
+#   distributed under the License is distributed on an "AS IS" BASIS,
+#   WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+#   See the License for the specific language governing permissions and
+#   limitations under the License.
+
+import warnings
+from multiprocessing import Manager
+
 import numpy as np
-import pymc as pm
-import arviz as az
-from typing import List, Optional, Callable, Dict, Any, Union
-from functools import partial
+import numpy.typing as npt
+import pytensor.tensor as pt
+from pandas import DataFrame, Series
+from pymc.distributions.distribution import Distribution, _support_point
+from pymc.logprob.abstract import _logprob
+from pytensor.tensor.random.op import RandomVariable
+from pytensor.tensor.sharedvar import TensorSharedVariable
+from pytensor.tensor.variable import TensorVariable
 
-from pymc_bart.split_rules import continuous_split_rule, target_split_rule
+from .split_rules import SplitRule
+from .utils import TensorLike, _sample_posterior
+
+__all__ = ["BART"]
 
 
-class BART:
-    def __init__(
-        self,
-        X: np.ndarray,
-        Y: np.ndarray,
-        feature_types: Optional[List[str]] = None,
-        split_rules: Optional[List[Callable]] = None,
+class BARTRV(RandomVariable):
+    """Base class for BART."""
+
+    name: str = "BART"
+    signature = "(m,n),(m),(),(),() -> (m)"
+    dtype: str = "floatX"
+    _print_name: tuple[str, str] = ("BART", "\\operatorname{BART}")
+
+    def _supp_shape_from_params(self, dist_params, rep_param_idx=1, param_shapes=None):  # pylint: disable=arguments-renamed
+        idx = dist_params[0].ndim - 2
+        return [dist_params[0].shape[idx]]
+
+    @classmethod
+    def rng_fn(  # pylint: disable=W0237
+        cls, rng=None, X=None, Y=None, m=None, alpha=None, beta=None, size=None
+    ):
+        if not size:
+            size = None
+
+        if not hasattr(cls, "all_trees") or not cls.all_trees:
+            if isinstance(cls.Y, (TensorSharedVariable, TensorVariable)):
+                Y = cls.Y.eval()
+            else:
+                Y = cls.Y
+
+            if size is not None:
+                return np.full((size[0], Y.shape[0]), Y.mean())
+            else:
+                return np.full(Y.shape[0], Y.mean())
+        else:
+            if size is not None:
+                shape = size[0]
+            else:
+                shape = 1
+            return _sample_posterior(cls.all_trees, cls.X, rng=rng, shape=shape).squeeze().T
+
+
+bart = BARTRV()
+
+
+class BART(Distribution):
+    r"""
+    Bayesian Additive Regression Tree distribution.
+
+    Distribution representing a sum over trees
+
+    Parameters
+    ----------
+    X : PyTensor Variable, Pandas/Polars DataFrame or Numpy array
+        The covariate matrix.
+    Y : PyTensor Variable, Pandas/Polar DataFrame/Series,or Numpy array
+        The response vector.
+    m : int
+        Number of trees.
+    response : str
+        How the leaf_node values are computed. Available options are ``constant``, ``linear`` or
+        ``mix``. Defaults to ``constant``. Options ``linear`` and ``mix`` are still experimental.
+    alpha : float
+        Controls the prior probability over the depth of the trees.
+        Should be in the (0, 1) interval.
+    beta : float
+        Controls the prior probability over the number of leaves of the trees.
+        Should be positive.
+    split_prior : Optional[list[float]], default None.
+        List of positive numbers, one per column in input data.
+        Defaults to None, all covariates have the same prior probability to be selected.
+    split_rules : Optional[list[SplitRule]], default None
+        List of SplitRule objects, one per column in input data.
+        Allows using different split rules for different columns. Default is ContinuousSplitRule.
+        Other options are OneHotSplitRule and SubsetSplitRule, both meant for categorical variables.
+    separate_trees : Optional[bool], default False
+        When training multiple trees (by setting a shape parameter), the default behavior is to
+        learn a joint tree structure and only have different leaf values for each.
+        This flag forces a fully separate tree structure to be trained instead.
+        This is unnecessary in many cases and is considerably slower, multiplying
+        run-time roughly by number of dimensions.
+    use_target_split : bool, default False
+        Whether to use TargetSplit for categorical features.
+    categorical_features : Optional[list[int]], default None
+        List of indices of categorical features. If None, will be auto-detected.
+    target_split_alpha : float, default 1.0
+        Smoothing parameter for target statistics calculation.
+
+    Notes
+    -----
+    The parameters ``alpha`` and ``beta`` parametrize the probability that a node at
+    depth :math:`d \: (= 0, 1, 2,...)` is non-terminal, given by :math:`\alpha(1 + d)^{-\beta}`.
+    The default values are :math:`\alpha = 0.95` and :math:`\beta = 2`.
+
+    This is the recommend prior by Chipman Et al. BART: Bayesian additive regression trees,
+    `link <https://doi.org/10.1214/09-AOAS285>`__
+    """
+
+    def __new__(
+        cls,
+        name: str,
+        X: TensorLike,
+        Y: TensorLike,
         m: int = 50,
         alpha: float = 0.95,
         beta: float = 2.0,
-        **kwargs
+        response: str = "constant",
+        split_prior: npt.NDArray | None = None,
+        split_rules: list[SplitRule] | None = None,
+        separate_trees: bool | None = False,
+        # New parameters for TargetSplit
+        use_target_split: bool = False,
+        categorical_features: list[int] | None = None,
+        target_split_alpha: float = 1.0,
+        **kwargs,
     ):
-        self.X = X
-        self.Y = Y
-        self.m = m
-        self.alpha = alpha
-        self.beta = beta
-        
-        # Handle feature types and split rules
-        self.feature_types = feature_types or self._infer_feature_types(X)
-        self.split_rules = split_rules or self._create_split_rules()
-        
-        # Validate dimensions
-        if len(self.feature_types) != X.shape[1]:
-            raise ValueError(f"feature_types length ({len(self.feature_types)}) must match number of features ({X.shape[1]})")
-        if len(self.split_rules) != X.shape[1]:
-            raise ValueError(f"split_rules length ({len(self.split_rules)}) must match number of features ({X.shape[1]})")
-        
-        self.kwargs = kwargs
-        self.model = None
-        self.trace = None
-        
-        self._build_model()
-    
-    def _infer_feature_types(self, X: np.ndarray) -> List[str]:
-        """Infer feature types based on data characteristics."""
-        feature_types = []
-        n_samples, n_features = X.shape
-        
-        for i in range(n_features):
-            unique_vals = len(np.unique(X[:, i]))
-            # Simple heuristic for categorical features
-            if unique_vals <= min(20, n_samples / 10) and not self._is_likely_continuous(X[:, i]):
-                feature_types.append('categorical')
-            else:
-                feature_types.append('continuous')
-        
-        return feature_types
-    
-    def _is_likely_continuous(self, feature_values: np.ndarray) -> bool:
-        """Check if feature is likely continuous."""
-        unique_vals = np.unique(feature_values)
-        if len(unique_vals) > 20:
-            return True
-        
-        # Check if values are numeric and have reasonable spread
-        if np.issubdtype(feature_values.dtype, np.number):
-            value_range = np.max(feature_values) - np.min(feature_values)
-            if value_range > 1e-10:
-                return True
-        
-        return False
-    
-    def _create_split_rules(self) -> List[Callable]:
-        """Create appropriate split rules for each feature."""
-        split_rules = []
-        for feature_type in self.feature_types:
-            if feature_type == 'categorical':
-                # Use target-based split rule for categorical features
-                split_rules.append(partial(target_split_rule, alpha=1.0))
-            else:
-                # Use continuous split rule for continuous features
-                split_rules.append(continuous_split_rule)
-        return split_rules
-    
-    def _build_model(self):
-        """Build the BART model with categorical feature support."""
-        with pm.Model() as self.model:
-            # Tree parameters
-            tree_parameters = pm.Gamma("tree_parameters", alpha=self.alpha, beta=self.beta, shape=self.m)
-            
-            # Tree outputs
-            tree_outputs = pm.Normal("tree_outputs", 0, 1, shape=self.m)
-            
-            # Store tree information
-            self.tree_info = {
-                'split_rules': self.split_rules,
-                'feature_types': self.feature_types,
-                'X': jnp.array(self.X),
-                'Y': jnp.array(self.Y),
-                'parameters': tree_parameters,
-                'outputs': tree_outputs
-            }
-            
-            # Sum of trees (simplified - actual implementation would use tree structures)
-            tree_sum = pm.Deterministic("tree_sum", jnp.sum(tree_outputs))
-            
-            # Likelihood
-            y_obs = pm.Normal("y_obs", mu=tree_sum, sigma=0.1, observed=self.Y)
-    
-    def fit(self, draws: int = 1000, tune: int = 1000, **kwargs) -> az.InferenceData:
-        """Fit the BART model."""
-        if self.model is None:
-            self._build_model()
-        
-        with self.model:
-            self.trace = pm.sample(draws=draws, tune=tune, **kwargs)
-        
-        return self.trace
-    
-    def predict(self, X_new: np.ndarray) -> np.ndarray:
-        """Make predictions using the fitted model."""
-        if self.trace is None:
-            raise ValueError("Model must be fitted before prediction")
-        
-        # Simplified prediction - in practice you'd use the actual tree structures
-        # from the trace to make predictions
-        posterior = self.trace.posterior
-        tree_outputs = posterior['tree_outputs'].values
-        
-        # Average over chains and draws
-        n_chains, n_draws, n_trees = tree_outputs.shape
-        tree_outputs_flat = tree_outputs.reshape(-1, n_trees)
-        
-        # Simple prediction: sum of average tree outputs
-        avg_tree_outputs = np.mean(tree_outputs_flat, axis=0)
-        predictions = np.full(X_new.shape[0], np.sum(avg_tree_outputs))
-        
-        return predictions
+        if response in ["linear", "mix"]:
+            warnings.warn(
+                "Options linear and mix are experimental and still not well tested\n"
+                + "Use with caution."
+            )
+        # Create a unique manager list for each BART instance
+        manager = Manager()
+        instance_all_trees = manager.list()
 
-    def _build_single_tree(self, X, y, split_rules, feature_types, depth=0, max_depth=5):
+        X, Y = preprocess_xy(X, Y)
+
+        split_prior = np.array([]) if split_prior is None else np.asarray(split_prior)
+
+        bart_op = type(
+            f"BART_{name}",
+            (BARTRV,),
+            {
+                "name": "BART",
+                "all_trees": instance_all_trees,  # Instance-specific tree storage
+                "inplace": False,
+                "initval": Y.mean(),
+                "X": X,
+                "Y": Y,
+                "m": m,
+                "response": response,
+                "alpha": alpha,
+                "beta": beta,
+                "split_prior": split_prior,
+                "split_rules": split_rules,
+                "separate_trees": separate_trees,
+                # New attributes for TargetSplit
+                "use_target_split": use_target_split,
+                "categorical_features": categorical_features or [],
+                "target_split_alpha": target_split_alpha,
+            },
+        )()
+
+        Distribution.register(BARTRV)
+
+        @_support_point.register(BARTRV)
+        def get_moment(rv, size, *rv_inputs):
+            return cls.get_moment(rv, size, *rv_inputs)
+
+        cls.rv_op = bart_op
+        params = [X, Y, m, alpha, beta]
+        return super().__new__(cls, name, *params, **kwargs)
+
+    @classmethod
+    def dist(cls, *params, **kwargs):
+        return super().dist(params, **kwargs)
+
+    def logp(self, x, *inputs):
+        """Calculate log probability.
+
+        Parameters
+        ----------
+        x: numeric, TensorVariable
+            Value for which log-probability is calculated.
+
+        Returns
+        -------
+        TensorVariable
         """
-        Recursively build a single tree structure using appropriate split rules.
-        This is a helper function for tree construction.
+        return pt.zeros_like(x)
+
+    @classmethod
+    def get_moment(cls, rv, size, *rv_inputs):
+        mean = pt.fill(size, rv.Y.mean())
+        return mean
+
+    def predict(self, X: TensorLike, trace=None, size: int = 100, random_seed: int | None = None) -> npt.NDArray:
         """
-        if depth >= max_depth or len(y) < 2:
-            return {'leaf': jnp.mean(y)}
+        Generate predictions from BART model.
+
+        Parameters
+        ----------
+        X : TensorLike
+            New input data for prediction
+        trace : arviz InferenceData, optional
+            Trace from posterior sampling. If None, uses stored all_trees.
+        size : int
+            Number of posterior samples to draw. Defaults to 100.
+        random_seed : Optional[int]
+            Random seed for reproducibility.
+
+        Returns
+        -------
+        npt.NDArray
+            Predictions of shape (n_samples, n_observations) or (n_observations,) if size=1
+        """
+        rng = np.random.default_rng(random_seed)
         
-        best_gain = -jnp.inf
-        best_split = None
-        best_feature = None
-        
-        # Try all features
-        for feature in range(X.shape[1]):
-            split_rule = split_rules[feature]
-            split_result = split_rule(X, y, feature, min_samples_leaf=1)
-            
-            if split_result is not None:
-                split_value, gain = split_result
-                if gain > best_gain:
-                    best_gain = gain
-                    best_split = split_value
-                    best_feature = feature
-        
-        if best_split is None:
-            return {'leaf': jnp.mean(y)}
-        
-        # Create split based on feature type
-        if feature_types[best_feature] == 'categorical':
-            # For categorical, we use the computed split value from target statistics
-            left_mask = X[:, best_feature] <= best_split
+        if isinstance(X, (np.ndarray, DataFrame, Series)):
+            X_pred = preprocess_xy(X, np.zeros(1))[0]
         else:
-            # For continuous, normal split
-            left_mask = X[:, best_feature] <= best_split
-        
-        right_mask = ~left_mask
-        
-        if jnp.sum(left_mask) == 0 or jnp.sum(right_mask) == 0:
-            return {'leaf': jnp.mean(y)}
-        
-        # Recursively build subtrees
-        left_subtree = self._build_single_tree(
-            X[left_mask], y[left_mask], split_rules, feature_types, depth + 1, max_depth
+            X_pred = X.eval() if isinstance(X, (TensorVariable, TensorSharedVariable)) else X
+
+        # Get trees from trace or stored all_trees
+        if trace is not None:
+            from arviz import InferenceData
+            if isinstance(trace, InferenceData):
+                # Extract BART trees from trace if available
+                all_trees = self.rv_op.all_trees
+            else:
+                raise ValueError("trace must be an arviz InferenceData object")
+        else:
+            all_trees = self.rv_op.all_trees
+
+        if not all_trees:
+            # Return mean predictions if no trees available
+            return np.full((size, X_pred.shape[0]), self.rv_op.Y.mean())
+
+        # Generate predictions by sampling from posterior
+        predictions = _sample_posterior(
+            all_trees=list(all_trees),
+            X=X_pred,
+            rng=rng,
+            size=size,
+            excluded=None,
+            shape=1,
         )
-        right_subtree = self._build_single_tree(
-            X[right_mask], y[right_mask], split_rules, feature_types, depth + 1, max_depth
-        )
-        
-        return {
-            'feature': best_feature,
-            'split_value': best_split,
-            'feature_type': feature_types[best_feature],
-            'left': left_subtree,
-            'right': right_subtree
-        }
+
+        return predictions.squeeze()
 
 
-def train_bart_model(
-    X: np.ndarray,
-    y: np.ndarray,
-    feature_types: Optional[List[str]] = None,
-    m: int = 50,
-    alpha: float = 0.95,
-    beta: float = 2.0,
-    draws: int = 1000,
-    tune: int = 1000,
-    **kwargs
-) -> BART:
-    """
-    Convenience function to train a BART model.
-    
-    Args:
-        X: Feature matrix
-        y: Target values
-        feature_types: List of feature types ('continuous' or 'categorical')
-        m: Number of trees
-        alpha: Alpha parameter for tree prior
-        beta: Beta parameter for tree prior
-        draws: Number of posterior draws
-        tune: Number of tuning steps
-    
-    Returns:
-        Trained BART model
-    """
-    bart = BART(
-        X=X,
-        Y=y,
-        feature_types=feature_types,
-        m=m,
-        alpha=alpha,
-        beta=beta,
-        **kwargs
-    )
-    
-    bart.fit(draws=draws, tune=tune)
-    
-    return bart
+def preprocess_xy(X: TensorLike, Y: TensorLike) -> tuple[npt.NDArray, npt.NDArray]:
+    if isinstance(Y, (Series, DataFrame)):
+        Y = Y.to_numpy()
+    if isinstance(X, (Series, DataFrame)):
+        X = X.to_numpy()
+
+    try:
+        import polars as pl
+
+        if isinstance(X, (pl.Series, pl.DataFrame)):
+            X = X.to_numpy()
+        if isinstance(Y, (pl.Series, pl.DataFrame)):
+            Y = Y.to_numpy()
+    except ImportError:
+        pass
+
+    Y = Y.astype(float)
+    X = X.astype(float)
+
+    return X, Y
+
+
+@_logprob.register(BARTRV)
+def logp(op, value_var, *dist_params, **kwargs):
+    _dist_params = dist_params[3:]
+    value_var = value_var[0]
+    return BART.logp(value_var, *_dist_params)  # pylint: disable=no-value-for-parameter
